@@ -12,7 +12,7 @@ export function generateSyntheticMemoryGraph(nodeCount = 2000, edgeFactor = 3): 
   const nodes: MemoryGraphNode[] = [];
   const edges: MemoryGraphEdge[] = [];
 
-  const sourceCount = Math.max(1, Math.round(nodeCount * 0.05));
+  const sourceCount = Math.min(24, Math.max(1, Math.round(nodeCount * 0.05)));
   const topicCount = Math.max(1, Math.round(nodeCount * 0.03));
   const memoryCount = nodeCount - sourceCount - topicCount;
 
@@ -87,7 +87,9 @@ export function generateSyntheticMemoryGraph(nodeCount = 2000, edgeFactor = 3): 
         type: "TAGGED_WITH",
         source: memoryId,
         target: topicId,
-        origin: i % 4 === 0 ? "EXPLICIT_TAG" : "DERIVED_TFIDF"
+        origin: i % 4 === 0 ? "EXPLICIT_TAG" : "DERIVED_TFIDF",
+        confidence: 0.95,
+        evidence: `Synthetic topic linkage for record ${i}`
       });
     }
 
@@ -126,8 +128,8 @@ export function generateSyntheticMemoryGraph(nodeCount = 2000, edgeFactor = 3): 
     layoutVersion: 1,
     taxonomyVersion: 1,
     generatedAt: "2026-10-16T12:00:00.000Z",
-    sourceHash: `synthetic-${nodeCount}`,
-    revisionHash: `synthetic-${nodeCount}`,
+    sourceHash: nodeCount.toString(16).padStart(64, "a"),
+    revisionHash: nodeCount.toString(16).padStart(64, "b"),
     isStale: false,
     nodes,
     edges,
