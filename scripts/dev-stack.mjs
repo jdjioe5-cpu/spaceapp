@@ -1,9 +1,8 @@
 #!/usr/bin/env node
-import { spawn, spawnSync, execFileSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
-import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 
@@ -11,6 +10,28 @@ const ROOT = process.cwd();
 const TEMPLATE_COMPOSE_PATH = path.join(ROOT, "packages", "run-spaceapp", "templates", "compose.yml");
 const DOCKERFILE_PATH = path.join(ROOT, "Dockerfile");
 
+/**
+ * Validates that a configured port is an integer in the valid range 1-65535.
+ *
+ * @param {string} name - Port name for error reporting.
+ * @param {number} port - Port number to validate.
+ * @returns {number} The validated port number.
+ * @throws {Error} If the port is not an integer between 1 and 65535.
+ */
+export function validatePort(name, port) {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`Invalid port for ${name}: ${port}. Port must be an integer between 1 and 65535.`);
+  }
+  return port;
+}
+
+/**
+ * Parses pinned Docker image references for PostgreSQL and Temporal from the template compose file.
+ *
+ * @param {string} composeContent - Contents of packages/run-spaceapp/templates/compose.yml.
+ * @returns {{ postgres: string, temporal: string }} Pinned image names and digests.
+ * @throws {Error} If postgres or temporal image digests cannot be parsed.
+ */
 export function parsePinnedImages(composeContent) {
   const postgresMatch = composeContent.match(/image:\s*(pgvector\/pgvector:[^\s\r\n]+)/);
   const temporalMatch = composeContent.match(/image:\s*(temporalio\/auto-setup:[^\s\r\n]+)/);
@@ -23,6 +44,13 @@ export function parsePinnedImages(composeContent) {
   };
 }
 
+/**
+ * Parses the pinned version of opencode-ai from the repository Dockerfile.
+ *
+ * @param {string} dockerfileContent - Contents of Dockerfile.
+ * @returns {string} Pinned semver string for opencode-ai.
+ * @throws {Error} If the version string cannot be found.
+ */
 export function parsePinnedOpencodeVersion(dockerfileContent) {
   const match = dockerfileContent.match(/opencode-ai@([0-9.]+)/);
   if (!match) {
@@ -31,13 +59,19 @@ export function parsePinnedOpencodeVersion(dockerfileContent) {
   return match[1].trim();
 }
 
+/**
+ * Resolves dev-stack configuration from environment variables with defaults.
+ *
+ * @param {Record<string, string | undefined>} [env=process.env] - Environment variables map.
+ * @returns {object} Dev stack configuration options and resolved paths.
+ */
 export function resolveDevStackConfig(env = process.env) {
   const stateRoot = path.resolve(ROOT, env.SPACEAPP_DEV_STATE_ROOT || ".dev-stack");
   const composeProject = env.SPACEAPP_DEV_PROJECT || "spaceapp-dev";
-  const webPort = Number.parseInt(env.SPACEAPP_DEV_WEB_PORT || env.SPACE_WEB_PORT || "5911", 10);
-  const apiPort = Number.parseInt(env.SPACEAPP_DEV_API_PORT || env.SPACE_API_PORT || "5910", 10);
-  const postgresPort = Number.parseInt(env.SPACEAPP_DEV_POSTGRES_PORT || "54329", 10);
-  const temporalPort = Number.parseInt(env.SPACEAPP_DEV_TEMPORAL_PORT || "72339", 10);
+  const webPort = validatePort("webPort", Number.parseInt(env.SPACEAPP_DEV_WEB_PORT || env.SPACE_WEB_PORT || "5911", 10));
+  const apiPort = validatePort("apiPort", Number.parseInt(env.SPACEAPP_DEV_API_PORT || env.SPACE_API_PORT || "5910", 10));
+  const postgresPort = validatePort("postgresPort", Number.parseInt(env.SPACEAPP_DEV_POSTGRES_PORT || "54329", 10));
+  const temporalPort = validatePort("temporalPort", Number.parseInt(env.SPACEAPP_DEV_TEMPORAL_PORT || "57233", 10));
 
   return {
     stateRoot,
@@ -56,6 +90,20 @@ export function resolveDevStackConfig(env = process.env) {
   };
 }
 
+/**
+ * Generates the Docker Compose YAML configuration for isolated dev services.
+ * Uses Docker Compose secrets to ensure containers can read passwords even when
+ * the host file is owned exclusively by the current user (mode 0600).
+ *
+ * @param {object} params
+ * @param {string} params.postgresImage - Pinned image digest for PostgreSQL.
+ * @param {string} params.temporalImage - Pinned image digest for Temporal.
+ * @param {number} params.postgresPort - Host port bound to PostgreSQL.
+ * @param {number} params.temporalPort - Host port bound to Temporal.
+ * @param {string} params.secretsDir - Directory where postgres-password is kept.
+ * @param {string} params.composeProject - Unique Compose project name.
+ * @returns {string} Docker Compose YAML definition.
+ */
 export function generateDevComposeYaml({ postgresImage, temporalImage, postgresPort, temporalPort, secretsDir, composeProject }) {
   const pwFile = path.resolve(secretsDir, "postgres-password").replaceAll("\\", "/");
   return `name: ${composeProject}
@@ -67,9 +115,11 @@ services:
       POSTGRES_DB: spaceapp
       POSTGRES_USER: spaceapp
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres-password
+    secrets:
+      - source: postgres-password
+        target: /run/secrets/postgres-password
     volumes:
       - dev-postgres-data:/var/lib/postgresql/data
-      - "${pwFile}:/run/secrets/postgres-password:ro"
     ports:
       - "127.0.0.1:${postgresPort}:5432"
     healthcheck:
@@ -93,8 +143,9 @@ services:
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - export POSTGRES_PWD="$$(cat /run/secrets/postgres-password)"; exec /etc/temporal/entrypoint.sh autosetup
-    volumes:
-      - "${pwFile}:/run/secrets/postgres-password:ro"
+    secrets:
+      - source: postgres-password
+        target: /run/secrets/postgres-password
     ports:
       - "127.0.0.1:${temporalPort}:7233"
     healthcheck:
@@ -103,11 +154,21 @@ services:
       timeout: 5s
       retries: 25
 
+secrets:
+  postgres-password:
+    file: "${pwFile}"
+
 volumes:
   dev-postgres-data:
 `;
 }
 
+/**
+ * Initializes secrets with owner-only permissions (0600) and returns secret metadata.
+ *
+ * @param {ReturnType<typeof resolveDevStackConfig>} config
+ * @returns {{ password: string, sessionSecret: string, setupToken: string, databaseUrl: string, setupTokenPath: string }}
+ */
 function ensureSecrets(config) {
   mkdirSync(config.secretsDir, { recursive: true });
   mkdirSync(config.runDir, { recursive: true });
@@ -153,6 +214,14 @@ function ensureSecrets(config) {
   };
 }
 
+/**
+ * Polls a TCP port until a connection succeeds or timeout is reached.
+ *
+ * @param {number} port
+ * @param {string} [host="127.0.0.1"]
+ * @param {number} [timeoutMs=60000]
+ * @returns {Promise<boolean>}
+ */
 async function waitForPort(port, host = "127.0.0.1", timeoutMs = 60000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -179,12 +248,25 @@ async function waitForPort(port, host = "127.0.0.1", timeoutMs = 60000) {
   throw new Error(`Timed out waiting for port ${host}:${port} after ${timeoutMs}ms`);
 }
 
+/**
+ * Synchronously executes a command and asserts zero exit status.
+ *
+ * @param {string} command
+ * @param {string[]} args
+ * @param {object} [options={}]
+ */
 function runCommand(command, args, options = {}) {
   const res = spawnSync(command, args, { stdio: "inherit", ...options });
   if (res.error) throw res.error;
   if (res.status !== 0) throw new Error(`${command} ${args.join(" ")} exited with code ${res.status}`);
 }
 
+/**
+ * Installs the pinned version of opencode-ai into the state directory and creates wrapper scripts.
+ *
+ * @param {ReturnType<typeof resolveDevStackConfig>} config
+ * @param {string} opencodeVersion
+ */
 export function setupOpencodeWrapper(config, opencodeVersion) {
   mkdirSync(config.opencodeDir, { recursive: true });
   mkdirSync(config.binDir, { recursive: true });
@@ -217,6 +299,13 @@ exec opencode "$@"
   }
 }
 
+/**
+ * Stops running dev-stack child processes and Docker Compose services.
+ *
+ * @param {ReturnType<typeof resolveDevStackConfig>} config
+ * @param {{ purge?: boolean }} [options]
+ * @returns {Promise<void>}
+ */
 export async function stopDevStack(config, { purge = false } = {}) {
   const composeFile = path.join(config.stateRoot, "docker-compose.yml");
   console.log("Stopping dev-stack processes and containers...");
@@ -254,6 +343,13 @@ export async function stopDevStack(config, { purge = false } = {}) {
   }
 }
 
+/**
+ * Starts the full SpaceApp dev stack from source.
+ * Spawns Docker dependencies, runs migrations, prepares opencode wrapper, and launches child servers.
+ *
+ * @param {ReturnType<typeof resolveDevStackConfig>} config
+ * @returns {Promise<void>}
+ */
 export async function startDevStack(config) {
   console.log("Starting SpaceApp dev-stack from source...");
 
@@ -298,7 +394,7 @@ export async function startDevStack(config) {
 
   // Build required packages if not already built
   console.log("Ensuring packages are compiled...");
-  runCommand("npm", ["run", "build -w @space/contracts", "&&", "npm", "run", "build -w @space/cli-host", "&&", "npm", "run", "build -w @space/worker"], {
+  runCommand("npm", ["run", "build:packages"], {
     shell: true
   });
 
@@ -369,23 +465,36 @@ export async function startDevStack(config) {
   });
   children.set("worker", workerProc);
 
-  // 3. API in watch mode
+  // 3. API in watch mode (launch direct tsx CLI via node to avoid intermediate npx wrapper)
   console.log("Spawning API in watch mode...");
-  const npxCmd = process.platform === "win32" ? "npx.cmd" : "npx";
-  const apiProc = spawn(npxCmd, ["tsx", "watch", "src/server.ts"], {
-    cwd: path.join(ROOT, "apps", "api"),
-    env: envCommon,
-    stdio: "inherit"
-  });
+  const tsxCli = path.join(ROOT, "node_modules", "tsx", "dist", "cli.mjs");
+  const apiProc = existsSync(tsxCli)
+    ? spawn(process.execPath, [tsxCli, "watch", "src/server.ts"], {
+        cwd: path.join(ROOT, "apps", "api"),
+        env: envCommon,
+        stdio: "inherit"
+      })
+    : spawn(process.platform === "win32" ? "npx.cmd" : "npx", ["tsx", "watch", "src/server.ts"], {
+        cwd: path.join(ROOT, "apps", "api"),
+        env: envCommon,
+        stdio: "inherit"
+      });
   children.set("api", apiProc);
 
-  // 4. Vite Web dev server
+  // 4. Vite Web dev server (launch direct vite CLI via node to avoid intermediate npx wrapper)
   console.log(`Spawning Vite Web dev server on port ${config.webPort}...`);
-  const webProc = spawn(npxCmd, ["vite", "--host", "127.0.0.1", "--port", String(config.webPort)], {
-    cwd: path.join(ROOT, "apps", "web"),
-    env: envCommon,
-    stdio: "inherit"
-  });
+  const viteCli = path.join(ROOT, "node_modules", "vite", "bin", "vite.js");
+  const webProc = existsSync(viteCli)
+    ? spawn(process.execPath, [viteCli, "--host", "127.0.0.1", "--port", String(config.webPort)], {
+        cwd: path.join(ROOT, "apps", "web"),
+        env: envCommon,
+        stdio: "inherit"
+      })
+    : spawn(process.platform === "win32" ? "npx.cmd" : "npx", ["vite", "--host", "127.0.0.1", "--port", String(config.webPort)], {
+        cwd: path.join(ROOT, "apps", "web"),
+        env: envCommon,
+        stdio: "inherit"
+      });
   children.set("web", webProc);
 
   // Write PIDs
@@ -414,6 +523,9 @@ export async function startDevStack(config) {
   console.log("Press Ctrl+C to stop the stack.\n");
 }
 
+/**
+ * Main CLI entrypoint for scripts/dev-stack.mjs.
+ */
 async function main() {
   const args = process.argv.slice(2);
   const config = resolveDevStackConfig();

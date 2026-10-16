@@ -68,7 +68,7 @@ The development stack uses its own Docker Compose project (`spaceapp-dev`), a gi
 - **Web UI**: `http://127.0.0.1:5911` (override via `SPACEAPP_DEV_WEB_PORT`)
 - **API Server**: `http://127.0.0.1:5910` (override via `SPACEAPP_DEV_API_PORT`)
 - **PostgreSQL**: `127.0.0.1:54329` (override via `SPACEAPP_DEV_POSTGRES_PORT`)
-- **Temporal**: `127.0.0.1:72339` (override via `SPACEAPP_DEV_TEMPORAL_PORT`)
+- **Temporal**: `127.0.0.1:57233` (override via `SPACEAPP_DEV_TEMPORAL_PORT`)
 
 ### Secrets and owner setup
 All credentials (database password, session secret, setup token) are generated inside `.dev-stack/secrets/` with strict mode `0600`. They are never printed, apart from the one-time owner setup token.
@@ -78,6 +78,7 @@ Once the stack finishes starting, it prints the URL and setup token. Open `http:
 - Changes to `apps/api/src/` automatically restart the API server.
 - Changes to `apps/web/src/` are hot-reloaded by Vite in the browser.
 - OpenCode runs through the from-source CLI host using the pinned `opencode-ai` version in `.dev-stack/`, without needing global installation or paid AI provider credentials.
+- When editing code in `packages/*`, run `npm run build:packages` (or `npm run build -w <package-name>`) to recompile the shared artifacts used by the running stack.
 
 ### Platform notes
 - **Linux**: Requires Docker or rootless Podman (with docker-compose plugin) and Node.js.
