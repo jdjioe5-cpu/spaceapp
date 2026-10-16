@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { layoutMemoryNetwork3D, memory3DVolumeRatio, projectMemoryPoint, DEFAULT_MEMORY_CAMERA } from "../src/features/memory-workspace/memory-3d.js";
+import { layoutMemoryNetwork3D, layoutMemoryNetwork3DIncremental, memory3DVolumeRatio, projectMemoryPoint, DEFAULT_MEMORY_CAMERA } from "../src/features/memory-workspace/memory-3d.js";
+import { generateSyntheticMemoryGraph } from "../src/demo/synthetic-memory.js";
 import type { MemoryGraphNode, MemoryGraphEdge } from "@space/contracts";
 
 describe("3D memory projection", () => {
@@ -58,5 +59,29 @@ describe("3D memory projection", () => {
     const plane = Array.from({ length: 100 }, (_, i) => ({ x: i % 10, y: Math.floor(i / 10), z: i % 10 + Math.floor(i / 10) }));
     expect(memory3DVolumeRatio(plane)).toBeCloseTo(0);
     expect(layoutMemoryNetwork3D([], []).size).toBe(0);
+  });
+  it("streams incremental progress during layout and produces identical deterministic final result", async () => {
+    const { nodes, edges } = fixture();
+    const progressSteps: number[] = [];
+    const incrementalResult = await new Promise<Map<string, any>>((resolve) => {
+      layoutMemoryNetwork3DIncremental(nodes, edges, (intermediate: any, step: number, done: boolean) => {
+        progressSteps.push(step);
+        if (done) resolve(intermediate);
+      }, 30);
+    });
+    const standardResult = layoutMemoryNetwork3D(nodes, edges);
+    expect(progressSteps.length).toBeGreaterThanOrEqual(5);
+    expect(progressSteps).toContain(180);
+    expect([...incrementalResult]).toEqual([...standardResult]);
+  });
+  it("generates deterministic synthetic graphs across small and large scales", () => {
+    const graph2k = generateSyntheticMemoryGraph(2000);
+    expect(graph2k.nodes.length).toBe(2000);
+    expect(graph2k.edges.length).toBeGreaterThan(3000);
+    expect(graph2k.summary.nodeCount).toBe(2000);
+
+    const graph10k = generateSyntheticMemoryGraph(10000);
+    expect(graph10k.nodes.length).toBe(10000);
+    expect(graph10k.edges.length).toBeGreaterThan(15000);
   });
 });
