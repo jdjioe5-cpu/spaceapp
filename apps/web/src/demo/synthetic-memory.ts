@@ -39,7 +39,7 @@ export function generateSyntheticMemoryGraph(nodeCount = 2000, edgeFactor = 3): 
     edges.push({
       id: `edge:source-link-${i}`,
       type: "DERIVED_FROM",
-      source: i % 5 === 0 ? "source:core-root" : `source:file-${Math.floor(i / 2)}`,
+      source: i === 1 || i % 5 === 0 ? "source:core-root" : `source:file-${Math.floor(i / 2)}`,
       target: id,
       origin: "DERIVED_TFIDF"
     });
@@ -80,7 +80,8 @@ export function generateSyntheticMemoryGraph(nodeCount = 2000, edgeFactor = 3): 
 
     // Cross-link to a topic
     if (topicCount > 0 && i % 2 === 0) {
-      const topicId = `topic:topic-${i % topicCount}`;
+      const topicIndex = Math.floor(i / 2) % topicCount;
+      const topicId = `topic:topic-${topicIndex}`;
       edges.push({
         id: `edge:topic-${i}`,
         type: "TAGGED_WITH",
@@ -100,6 +101,24 @@ export function generateSyntheticMemoryGraph(nodeCount = 2000, edgeFactor = 3): 
         origin: "DERIVED_TFIDF"
       });
     }
+  }
+
+  // Generate deterministic supplementary edges until target edgeFactor is reached
+  const targetEdges = Math.round(nodeCount * edgeFactor);
+  let step = 1;
+  while (edges.length < targetEdges && memoryCount > 1) {
+    const idx = edges.length % memoryCount;
+    const targetIdx = (idx + step) % memoryCount;
+    if (idx !== targetIdx) {
+      edges.push({
+        id: `edge:dense-${edges.length}`,
+        type: "DERIVED_FROM",
+        source: `memory:rec-${idx}`,
+        target: `memory:rec-${targetIdx}`,
+        origin: "DERIVED_TFIDF"
+      });
+    }
+    step = (step % (memoryCount - 1)) + 1;
   }
 
   return {

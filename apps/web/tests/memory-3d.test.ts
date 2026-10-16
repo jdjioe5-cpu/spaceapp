@@ -75,13 +75,37 @@ describe("3D memory projection", () => {
     expect([...incrementalResult]).toEqual([...standardResult]);
   });
   it("generates deterministic synthetic graphs across small and large scales", () => {
-    const graph2k = generateSyntheticMemoryGraph(2000);
+    const graph2k = generateSyntheticMemoryGraph(2000, 3);
     expect(graph2k.nodes.length).toBe(2000);
-    expect(graph2k.edges.length).toBeGreaterThan(3000);
+    expect(graph2k.edges.length).toBe(6000);
     expect(graph2k.summary.nodeCount).toBe(2000);
+    expect(graph2k.summary.edgeCount).toBe(6000);
 
-    const graph10k = generateSyntheticMemoryGraph(10000);
+    const graph10k = generateSyntheticMemoryGraph(10000, 3);
     expect(graph10k.nodes.length).toBe(10000);
-    expect(graph10k.edges.length).toBeGreaterThan(15000);
+    expect(graph10k.edges.length).toBe(30000);
+
+    const graph50k = generateSyntheticMemoryGraph(50000, 3);
+    expect(graph50k.nodes.length).toBe(50000);
+    expect(graph50k.edges.length).toBe(150000);
+    expect(graph50k.summary.nodeCount).toBe(50000);
+    expect(graph50k.summary.edgeCount).toBe(150000);
+
+    // Verify first source links to root (no dangling source:file-0)
+    const firstSourceEdge = graph50k.edges.find(e => e.id === "edge:source-link-1");
+    expect(firstSourceEdge?.source).toBe("source:core-root");
+  });
+
+  it("roundtrips picking color encoding and decoding with boundary indices", async () => {
+    const { encodePickingColor, decodePickingColor } = await import("../src/features/memory-workspace/memory-graph-webgl.js");
+    const testIndices = [0, 1, 254, 255, 256, 1000, 49999];
+    for (const index of testIndices) {
+      const [r, g, b] = encodePickingColor(index);
+      const decoded = decodePickingColor(r, g, b, 255);
+      expect(decoded).toBe(index);
+    }
+    // Transparent pixel must decode to -1 (miss)
+    expect(decodePickingColor(0, 0, 0, 0)).toBe(-1);
+    expect(decodePickingColor(255, 255, 255, 0)).toBe(-1);
   });
 });
