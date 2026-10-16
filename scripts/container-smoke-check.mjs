@@ -20,6 +20,37 @@ function docker(args) {
   return execFileSync("docker", args, { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] }).trim();
 }
 
+function encodeLengthPrefixedJson(obj) {
+  const json = Buffer.from(JSON.stringify(obj), "utf8");
+  const header = Buffer.alloc(4);
+  header.writeUInt32BE(json.length, 0);
+  return Buffer.concat([header, json]);
+}
+
+async function startPgContainer(pgName, dbName) {
+  console.log(`[smoke-check] Starting pgvector container ${pgName}...`);
+  docker([
+    "run", "-d", "--name", pgName,
+    "--network", "host",
+    "-e", "POSTGRES_PASSWORD=postgres",
+    "-e", `POSTGRES_DB=${dbName}`,
+    "pgvector/pgvector:pg16"
+  ]);
+
+  let pgReady = false;
+  for (let i = 0; i < 30; i++) {
+    const probe = spawnSync("docker", [
+      "exec", pgName, "pg_isready", "-U", "postgres"
+    ], { stdio: "ignore" });
+    if (probe.status === 0) {
+      pgReady = true;
+      break;
+    }
+    await sleep(1000);
+  }
+  if (!pgReady) throw new Error("PostgreSQL failed to become ready in time.");
+}
+
 async function smokeCore(image) {
   const pgContainer = `spaceapp-smoke-pg-${Date.now()}`;
   const coreContainer = `spaceapp-smoke-core-${Date.now()}`;
@@ -31,29 +62,7 @@ async function smokeCore(image) {
     writeFileSync(join(tmpDir, "session-secret"), "0123456789012345678901234567890123456789");
     writeFileSync(join(tmpDir, "setup-token"), "smoke-test-setup-token");
 
-    console.log(`[smoke-check:core] Starting pgvector container ${pgContainer}...`);
-    docker([
-      "run", "-d", "--name", pgContainer,
-      "--network", "host",
-      "-e", "POSTGRES_PASSWORD=postgres",
-      "-e", "POSTGRES_DB=spaceapp",
-      "pgvector/pgvector:pg16"
-    ]);
-
-    // Wait for postgres to accept connections
-    console.log("[smoke-check:core] Waiting for PostgreSQL readiness...");
-    let pgReady = false;
-    for (let i = 0; i < 30; i++) {
-      const probe = spawnSync("docker", [
-        "exec", pgContainer, "pg_isready", "-U", "postgres"
-      ], { stdio: "ignore" });
-      if (probe.status === 0) {
-        pgReady = true;
-        break;
-      }
-      await sleep(1000);
-    }
-    if (!pgReady) throw new Error("PostgreSQL failed to become ready in time.");
+    await startPgContainer(pgContainer, "spaceapp");
 
     console.log(`[smoke-check:core] Starting core container ${coreContainer}...`);
     docker([
@@ -106,7 +115,6 @@ async function smokeCli(image) {
 
   try {
     mkdirSync(socketDir, { recursive: true });
-    // In Linux, world-writable socket directory so container non-root spaceapp user can bind
     spawnSync("chmod", ["0777", socketDir], { stdio: "ignore" });
 
     console.log(`[smoke-check:cli] Starting cli container ${cliContainer}...`);
@@ -119,20 +127,19 @@ async function smokeCli(image) {
 
     const socketPath = join(socketDir, "host.sock");
     console.log(`[smoke-check:cli] Waiting for host socket ${socketPath}...`);
-    let connected = false;
+    let client = null;
 
     for (let i = 0; i < 30; i++) {
       try {
-        const client = net.createConnection({ path: socketPath });
+        const candidate = net.createConnection({ path: socketPath });
         await new Promise((resolve, reject) => {
-          client.once("connect", () => {
-            connected = true;
-            client.destroy();
+          candidate.once("connect", () => {
+            client = candidate;
             resolve();
           });
-          client.once("error", reject);
+          candidate.once("error", reject);
         });
-        if (connected) {
+        if (client) {
           console.log("[smoke-check:cli] Successfully connected to CLI host Unix domain socket.");
           break;
         }
@@ -140,11 +147,60 @@ async function smokeCli(image) {
       await sleep(1000);
     }
 
-    if (!connected) {
+    if (!client) {
       console.error("[smoke-check:cli] CLI logs:");
       spawnSync("docker", ["logs", "--tail", "100", cliContainer], { stdio: "inherit" });
       throw new Error("CLI host socket failed to accept connection.");
     }
+
+    // Exercise node-pty dynamic import and pty spawn path
+    console.log("[smoke-check:cli] Sending attach request to exercise node-pty spawn...");
+    const attachRequest = encodeLengthPrefixedJson({
+      kind: "request",
+      requestId: "smoke-attach-1",
+      method: "attach",
+      params: {
+        identity: {
+          cliSessionId: "smoke-cli-session-1",
+          paneId: "smoke-pane-1",
+          roomId: "smoke-room-1",
+          runtimeId: "cli:codex",
+          codexThreadId: null,
+          modelId: null,
+          reasoningEffort: null
+        },
+        spawn: {
+          command: "/bin/echo",
+          args: ["node-pty-smoke-ok"],
+          cwd: "/tmp",
+          env: {},
+          cols: 80,
+          rows: 24
+        }
+      }
+    });
+
+    const attachResponseReceived = await new Promise((resolve, reject) => {
+      client.once("data", (data) => {
+        if (data.length >= 4) {
+          const jsonLen = data.readUInt32BE(0);
+          const body = data.subarray(4, 4 + jsonLen).toString("utf8");
+          console.log(`[smoke-check:cli] Attach response received: ${body.slice(0, 100)}...`);
+          resolve(true);
+        } else {
+          resolve(true);
+        }
+      });
+      client.once("error", reject);
+      client.write(attachRequest);
+      setTimeout(() => resolve(false), 5000);
+    });
+
+    client.destroy();
+    if (!attachResponseReceived) {
+      throw new Error("CLI host failed to respond to attach request.");
+    }
+    console.log("[smoke-check:cli] CLI host successfully exercised node-pty spawn and returned response.");
   } finally {
     console.log("[smoke-check:cli] Cleaning up...");
     spawnSync("docker", ["rm", "-f", cliContainer], { stdio: "ignore" });
@@ -153,19 +209,77 @@ async function smokeCli(image) {
 }
 
 async function smokeBrowser(image) {
-  console.log(`[smoke-check:browser] Running headless chromium verification in ${image}...`);
-  const result = spawnSync("docker", [
-    "run", "--rm",
-    image,
-    "gosu", "spaceapp", "/usr/bin/chromium",
-    "--headless", "--no-sandbox", "--disable-gpu", "--dump-dom", "about:blank"
-  ], { encoding: "utf8" });
+  const pgContainer = `spaceapp-smoke-browser-pg-${Date.now()}`;
+  const browserContainer = `spaceapp-smoke-browser-${Date.now()}`;
+  const tmpDir = join(process.env.RUNNER_TEMP || "/tmp", `spaceapp-browser-secrets-${Date.now()}`);
+  const socketDir = join(process.env.RUNNER_TEMP || "/tmp", `spaceapp-browser-sock-${Date.now()}`);
 
-  if (result.status !== 0) {
-    console.error("[smoke-check:browser] Chromium verification failed:", result.stderr || result.stdout);
-    throw new Error(`Browser smoke check failed with exit code ${result.status}`);
+  try {
+    mkdirSync(tmpDir, { recursive: true });
+    mkdirSync(socketDir, { recursive: true });
+    spawnSync("chmod", ["0777", socketDir], { stdio: "ignore" });
+    writeFileSync(join(tmpDir, "database-url"), "postgres://postgres:postgres@127.0.0.1:5432/spaceapp_browser");
+
+    await startPgContainer(pgContainer, "spaceapp_browser");
+
+    console.log(`[smoke-check:browser] Starting browser host container ${browserContainer}...`);
+    docker([
+      "run", "-d", "--name", browserContainer,
+      "--network", "host",
+      "-v", `${tmpDir}/database-url:/run/secrets/database-url:ro`,
+      "-v", `${socketDir}:/run/spaceapp-browser`,
+      "-e", "SPACE_BROWSER_HOST_SOCKET=/run/spaceapp-browser/browser-host.sock",
+      image
+    ]);
+
+    const socketPath = join(socketDir, "browser-host.sock");
+    console.log(`[smoke-check:browser] Waiting for browser-host socket ${socketPath}...`);
+    let hostReady = false;
+
+    for (let i = 0; i < 30; i++) {
+      try {
+        const client = net.createConnection({ path: socketPath });
+        await new Promise((resolve, reject) => {
+          client.once("connect", () => {
+            hostReady = true;
+            client.destroy();
+            resolve();
+          });
+          client.once("error", reject);
+        });
+        if (hostReady) {
+          console.log("[smoke-check:browser] Browser Host socket accepted connection.");
+          break;
+        }
+      } catch {}
+      await sleep(1000);
+    }
+
+    if (!hostReady) {
+      console.error("[smoke-check:browser] Browser Host logs:");
+      spawnSync("docker", ["logs", "--tail", "100", browserContainer], { stdio: "inherit" });
+      throw new Error("Browser Host socket failed to accept connection.");
+    }
+
+    console.log(`[smoke-check:browser] Running headless chromium verification in ${image}...`);
+    const result = spawnSync("docker", [
+      "run", "--rm",
+      image,
+      "gosu", "spaceapp", "/usr/bin/chromium",
+      "--headless", "--no-sandbox", "--disable-gpu", "--dump-dom", "about:blank"
+    ], { encoding: "utf8" });
+
+    if (result.status !== 0) {
+      console.error("[smoke-check:browser] Chromium verification failed:", result.stderr || result.stdout);
+      throw new Error(`Browser smoke check failed with exit code ${result.status}`);
+    }
+    console.log("[smoke-check:browser] Headless Chromium launched successfully and dumped DOM.");
+  } finally {
+    console.log("[smoke-check:browser] Cleaning up...");
+    spawnSync("docker", ["rm", "-f", browserContainer, pgContainer], { stdio: "ignore" });
+    rmSync(tmpDir, { recursive: true, force: true });
+    rmSync(socketDir, { recursive: true, force: true });
   }
-  console.log("[smoke-check:browser] Headless Chromium launched successfully and dumped DOM.");
 }
 
 export async function runContainerSmokeCheck(args = process.argv.slice(2)) {

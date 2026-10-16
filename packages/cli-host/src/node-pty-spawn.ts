@@ -10,6 +10,7 @@ import type { CliHostSpawn } from "./types.js";
 export const spawnNodePty: CliHostSpawn = async (spec) => {
   const nodePty = await import("node-pty");
   const spawn = nodePty.spawn ?? nodePty.default?.spawn;
+  if (typeof spawn !== "function") throw new Error("node-pty did not export spawn");
   return spawn("/bin/sh", ["-c", '/usr/bin/stty -isig; exec "$@"', "space-cli-host", spec.command, ...spec.args], {
     name: "xterm-256color",
     cols: spec.cols,

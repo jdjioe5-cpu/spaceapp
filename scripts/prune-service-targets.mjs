@@ -123,10 +123,12 @@ export function pruneServiceTargets({ targetArch = "amd64" } = {}) {
   safeCopy(join(root, "apps/worker"), join(coreRoot, "apps/worker"));
   safeCopy(join(root, "apps/web"), join(coreRoot, "apps/web"));
 
-  // Core packages (exclude cli-host to save space and isolate)
+  safeCopy(join(root, "agent-skills"), join(coreRoot, "agent-skills"));
+
+  // Core packages (packages/cli-host is included for workspace links and client, node-pty remains excluded)
   for (const pkg of [
     "browser-host", "contracts", "db", "gateway", "icons",
-    "memory-graph", "opencode-control", "runtime", "streaming", "codex-app-server"
+    "memory-graph", "opencode-control", "runtime", "streaming", "codex-app-server", "cli-host"
   ]) {
     safeCopy(join(root, `packages/${pkg}`), join(coreRoot, `packages/${pkg}`));
   }
