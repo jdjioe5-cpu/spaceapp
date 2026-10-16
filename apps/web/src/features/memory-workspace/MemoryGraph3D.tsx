@@ -3,8 +3,15 @@ import type { MemoryGraphNode, MemoryGraphEdge } from "@space/contracts";
 import type { MemoryAtlasPosition } from "./memory-atlas.js";
 import { isMemoryCoreLabel } from "./memory-graph-visuals.js";
 import { DEFAULT_MEMORY_CAMERA, memory3DVolumeRatio, projectMemoryPoint, type MemoryCamera3D, type MemoryPoint3D } from "./memory-3d.js";
-import { createWebGL2GraphRenderer, type WebGL2GraphRenderer } from "./memory-graph-webgl.js";
+import { createWebGL2GraphRenderer, encodePickingColor, type WebGL2GraphRenderer } from "./memory-graph-webgl.js";
 
+/**
+ * Parses a hex color string (#rgb or #rrggbb) into normalized RGBA floats [0-1].
+ *
+ * @param hex - Color in hex format.
+ * @param alpha - Optional alpha value (default: 1.0).
+ * @returns Tuple of [r, g, b, a] in 0-1 range.
+ */
 function parseHexColor(hex: string, alpha = 1.0): [number, number, number, number] {
   if (hex.startsWith("#")) {
     const clean = hex.slice(1);
@@ -27,6 +34,10 @@ function parseHexColor(hex: string, alpha = 1.0): [number, number, number, numbe
   return [0.45, 0.58, 0.68, alpha];
 }
 
+/**
+ * Interactive 3D memory graph visualizer supporting up to 50,000 nodes using WebGL2,
+ * with hardware depth testing, GPU color-indexed picking, and Canvas 2D fallback.
+ */
 export function MemoryGraph3D({ nodes, edges, positions, coordinates, showTitles, selectedNodeId, onSelectNode, loading, resetToken }: {
   nodes: MemoryGraphNode[]; edges: MemoryGraphEdge[];
   positions: Map<string, MemoryAtlasPosition>; coordinates: Map<string, MemoryPoint3D>;
@@ -70,6 +81,8 @@ export function MemoryGraph3D({ nodes, edges, positions, coordinates, showTitles
     let activeNodes: MemoryGraphNode[] = [];
     let canvas2dPoints: Array<{ id: string; x: number; y: number; z: number; radius: number }> = [];
 
+    let isContextLost = false;
+
     function initRenderer() {
       if (webglRenderer) {
         webglRenderer.destroy();
@@ -82,26 +95,31 @@ export function MemoryGraph3D({ nodes, edges, positions, coordinates, showTitles
           setUseFallback2D(true);
         } else {
           setUseFallback2D(false);
+          isContextLost = false;
         }
       } catch (err) {
         console.warn("WebGL2 initialization failed, falling back to Canvas 2D:", err);
         setUseFallback2D(true);
       }
     }
-    initRenderer();
+    if (!useFallback2D) {
+      initRenderer();
+    }
 
     const handleContextLost = (e: Event) => {
       e.preventDefault();
-      console.warn("WebGL2 context lost. Switching to Canvas 2D fallback.");
-      setUseFallback2D(true);
+      console.warn("WebGL2 context lost. Rendering fallback on overlay canvas.");
+      isContextLost = true;
       if (webglRenderer) {
         webglRenderer.destroy();
         webglRenderer = null;
       }
+      schedule();
     };
 
     const handleContextRestored = () => {
       console.log("WebGL2 context restored. Reinitializing WebGL2 renderer.");
+      isContextLost = false;
       initRenderer();
       schedule();
     };
@@ -132,7 +150,7 @@ export function MemoryGraph3D({ nodes, edges, positions, coordinates, showTitles
         }
       }
 
-      if (webglRenderer && !useFallback2D) {
+      if (webglRenderer && !isContextLost && !useFallback2D) {
         // --- WebGL2 Rendering Path ---
         if (nodePointsBuf.length < nodeCount * 3) {
           nodePointsBuf = new Float32Array(Math.max(nodeCount * 3, 3000));
@@ -163,10 +181,10 @@ export function MemoryGraph3D({ nodes, edges, positions, coordinates, showTitles
           nodeColorsBuf[i * 4 + 3] = a;
 
           // Picking ID (i + 1 encoded into RGB bytes)
-          const pickVal = i + 1;
-          pickingIdsBuf[i * 3] = ((pickVal & 0xff)) / 255;
-          pickingIdsBuf[i * 3 + 1] = (((pickVal >> 8) & 0xff)) / 255;
-          pickingIdsBuf[i * 3 + 2] = (((pickVal >> 16) & 0xff)) / 255;
+          const [pr, pg, pb] = encodePickingColor(i);
+          pickingIdsBuf[i * 3] = pr / 255;
+          pickingIdsBuf[i * 3 + 1] = pg / 255;
+          pickingIdsBuf[i * 3 + 2] = pb / 255;
         }
 
         // Edge buffers
@@ -230,7 +248,7 @@ export function MemoryGraph3D({ nodes, edges, positions, coordinates, showTitles
         });
       } else {
         // --- Canvas 2D Fallback Path (capped at 2000 nodes) ---
-        const ctx = canvas.getContext("2d");
+        const ctx = useFallback2D ? (canvas as HTMLCanvasElement).getContext("2d") : (overlay as HTMLCanvasElement).getContext("2d");
         if (ctx) {
           ctx.clearRect(0, 0, width, height);
           const drawNodes = activeNodes.slice(0, 2000);
@@ -356,7 +374,7 @@ export function MemoryGraph3D({ nodes, edges, positions, coordinates, showTitles
     // Fast picking: uses GPU picking on WebGL2 (< 1 ms), falls back to 2D scan on fallback
     const hit = (x: number, y: number): string | null => {
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
-      if (webglRenderer && !useFallback2D) {
+      if (webglRenderer && !isContextLost && !useFallback2D) {
         const idx = webglRenderer.pick(x, y, width, height, dpr);
         return idx >= 0 && idx < activeNodes.length ? activeNodes[idx]!.id : null;
       }
@@ -469,6 +487,7 @@ export function MemoryGraph3D({ nodes, edges, positions, coordinates, showTitles
   return (
     <div className="memory-3d-surface" style={{ position: "relative" }}>
       <canvas
+        key={useFallback2D ? "canvas-2d" : "canvas-webgl"}
         ref={canvasRef}
         tabIndex={0}
         role="application"

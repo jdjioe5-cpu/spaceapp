@@ -114,6 +114,14 @@ void main() {
 }
 `;
 
+/**
+ * Compiles a GLSL shader.
+ *
+ * @param gl - WebGL2 context.
+ * @param type - Shader type (VERTEX_SHADER or FRAGMENT_SHADER).
+ * @param source - GLSL source code.
+ * @returns Compiled WebGLShader.
+ */
 function createShader(gl: WebGL2RenderingContext, type: number, source: string): WebGLShader {
   const shader = gl.createShader(type);
   if (!shader) throw new Error("Failed to allocate shader");
@@ -127,6 +135,14 @@ function createShader(gl: WebGL2RenderingContext, type: number, source: string):
   return shader;
 }
 
+/**
+ * Links vertex and fragment shaders into a WebGLProgram.
+ *
+ * @param gl - WebGL2 context.
+ * @param vsSource - Vertex shader GLSL source.
+ * @param fsSource - Fragment shader GLSL source.
+ * @returns Linked WebGLProgram.
+ */
 function createProgram(gl: WebGL2RenderingContext, vsSource: string, fsSource: string): WebGLProgram {
   const vs = createShader(gl, gl.VERTEX_SHADER, vsSource);
   const fs = createShader(gl, gl.FRAGMENT_SHADER, fsSource);
@@ -145,7 +161,37 @@ function createProgram(gl: WebGL2RenderingContext, vsSource: string, fsSource: s
   return program;
 }
 
+/**
+ * Encodes a 0-based node index into an RGB color tuple with an index + 1 offset
+ * (index 0 is reserved for background/miss).
+ *
+ * @param index - 0-based node index.
+ * @returns Tuple of [r, g, b] in 0-255 range.
+ */
+export function encodePickingColor(index: number): [number, number, number] {
+  const id = index + 1;
+  return [id & 0xff, (id >> 8) & 0xff, (id >> 16) & 0xff];
+}
+
+/**
+ * Decodes an RGB pixel tuple back into a 0-based node index (-1 on miss or invalid).
+ *
+ * @param r - Red byte (0-255).
+ * @param g - Green byte (0-255).
+ * @param b - Blue byte (0-255).
+ * @param a - Alpha byte (0-255).
+ * @returns 0-based node index, or -1 if transparent/background.
+ */
+export function decodePickingColor(r: number, g: number, b: number, a: number): number {
+  if (a === 0) return -1;
+  const id = (r & 0xff) | ((g & 0xff) << 8) | ((b & 0xff) << 16);
+  return id > 0 ? id - 1 : -1;
+}
+
 export interface WebGL2GraphRenderer {
+  /**
+   * Renders a frame of the 3D memory graph onto the WebGL2 canvas.
+   */
   render(params: {
     camera: MemoryCamera3D;
     extent: number;
@@ -161,10 +207,22 @@ export interface WebGL2GraphRenderer {
     edgeColors: Float32Array;
     edgeVertexCount: number;
   }): void;
+  /**
+   * Samples a pixel from the offscreen picking framebuffer and returns the hovered node index.
+   */
   pick(x: number, y: number, width: number, height: number, dpr: number): number;
+  /**
+   * Cleans up all GPU buffers, framebuffers, shaders, and programs.
+   */
   destroy(): void;
 }
 
+/**
+ * Initializes the native WebGL2 graph rendering engine and GPU picking pipeline.
+ *
+ * @param canvas - Target HTML canvas element.
+ * @returns WebGL2GraphRenderer instance or null if WebGL2 is not supported.
+ */
 export function createWebGL2GraphRenderer(canvas: HTMLCanvasElement): WebGL2GraphRenderer | null {
   const gl = canvas.getContext("webgl2", {
     alpha: true,
@@ -372,8 +430,7 @@ export function createWebGL2GraphRenderer(canvas: HTMLCanvasElement): WebGL2Grap
       ctx.readPixels(px, py, 1, 1, ctx.RGBA, ctx.UNSIGNED_BYTE, pixel);
       ctx.bindFramebuffer(ctx.FRAMEBUFFER, null);
 
-      if (pixel[3] === 0) return -1;
-      const index = (pixel[0] ?? 0) | ((pixel[1] ?? 0) << 8) | ((pixel[2] ?? 0) << 16) - 1;
+      const index = decodePickingColor(pixel[0] ?? 0, pixel[1] ?? 0, pixel[2] ?? 0, pixel[3] ?? 0);
       return index >= 0 && index < currentNodeCount ? index : -1;
     },
 
