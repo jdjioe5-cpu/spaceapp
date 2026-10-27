@@ -200,6 +200,7 @@ test("the process launcher dispatches only hard-coded executable literals", asyn
   for (const command of [
     "codesign",
     "docker",
+    "podman",
     "hdiutil",
     "open",
     "sg",
