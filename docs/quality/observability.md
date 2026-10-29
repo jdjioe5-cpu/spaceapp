@@ -329,3 +329,9 @@ No credential or transcript export was added.
   proxied (it returns the app's HTML shell) and `/api/metrics` returns 401, also
   with a public `X-Forwarded-For`. The Prometheus text is served only by the API
   listener on loopback (`127.0.0.1:4910/metrics`, 200).
+
+
+## Workflow and Worker Span Export over OTLP
+
+When `SPACE_OTEL_EXPORTER_OTLP_ENDPOINT` is configured, worker processes export a unified trace tree connecting the API request, Temporal workflow, and all activity attempts. Workflow spans are exported deterministically via Temporal sinks (`callDuringReplay: false`).
+

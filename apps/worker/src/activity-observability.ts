@@ -10,8 +10,10 @@ import {
   traceIdFromTraceparent,
   type FailureCategory
 } from "@space/contracts";
+import type { SpanExporter } from "@space/runtime";
 import { logIdentifier, workerLog, type WorkerLogValue } from "./worker-log.js";
 import { workerMetrics, type WorkerMetrics } from "./worker-metrics.js";
+import { allowlistSpanAttributes, runIdToSpanId, type OtlpSpan, type OtlpSpanLink } from "./otlp-attributes.js";
 
 /**
  * One structured start/finish record and metrics per activity execution, with
@@ -131,9 +133,18 @@ function isFailedResult(value: unknown): boolean {
 }
 
 export interface ObserveActivityDependencies {
+  spanExporter?: SpanExporter | null;
   metrics?: WorkerMetrics;
   now?: () => number;
   cancelled?: () => boolean;
+  /** OTLP export (SPACE_OTEL_EXPORTER_OTLP_ENDPOINT): one span per activity whose input carries a traceparent. */
+  spans?: SpanExporter | null;
+}
+
+function activityTraceparent(args: readonly unknown[]) {
+  const found: Partial<Record<CorrelationKey, string>> = {};
+  for (const arg of args) readCorrelation(arg, found, 2);
+  return parseTraceparent(found.traceparent);
 }
 
 export async function observeActivityExecution<T>(
@@ -185,17 +196,41 @@ export async function observeActivityExecution<T>(
       queueMs,
       rssBytes: process.memoryUsage().rss
     });
+    const parent = dependencies.spans ? activityTraceparent(args) : null;
+    if (parent) {
+      dependencies.spans!.record({
+        traceId: parent.traceId,
+        spanId: randomBytes(8).toString("hex"),
+        parentSpanId: parent.parentId,
+        name: `activity ${activityType}`,
+        startTimeUnixNano: BigInt(startedAt) * 1_000_000n,
+        endTimeUnixNano: BigInt(startedAt + durationMs) * 1_000_000n,
+        attributes: { "space.activity_type": activityType, "space.outcome": outcome, "space.attempt": info.attempt },
+        error: outcome === "FAILED" || outcome === "FAILED_RESULT",
+        kind: 1
+      });
+    }
   };
 
   try {
     const result = await observations.run(observation, execute);
-    if (isFailedResult(result)) finish("FAILED_RESULT", observation.reasonCode ?? "ACTIVITY_RESULT_FAILED", null);
-    else finish("COMPLETED", null, null);
+    if (isFailedResult(result)) {
+      const code = observation.reasonCode ?? "ACTIVITY_RESULT_FAILED";
+      finish("FAILED_RESULT", code, null);
+      if (dependencies.spanExporter) exportActivitySpanOtlp(dependencies, info, args, activityType, startedAt, now() - startedAt, queueMs, "FAILED_RESULT", categorizeFailureCode(code), code, null);
+    } else {
+      finish("COMPLETED", null, null);
+      if (dependencies.spanExporter) exportActivitySpanOtlp(dependencies, info, args, activityType, startedAt, now() - startedAt, queueMs, "COMPLETED", null, null, null);
+    }
     return result;
   } catch (error) {
     const cancelled = dependencies.cancelled?.() === true || /Cancel/i.test((error as { name?: string } | null)?.name ?? "");
     const errorName = logIdentifier((error as { name?: unknown } | null)?.name);
-    finish(cancelled ? "CANCELLED" : "FAILED", observation.reasonCode ?? errorCodeOf(error), errorName);
+    const code = observation.reasonCode ?? errorCodeOf(error);
+    const outcome: ActivityOutcome = cancelled ? "CANCELLED" : "FAILED";
+    const cat = cancelled ? "CANCELLED" : categorizeFailureCode(code);
+    finish(outcome, code, errorName);
+    if (dependencies.spanExporter) exportActivitySpanOtlp(dependencies, info, args, activityType, startedAt, now() - startedAt, queueMs, outcome, cat, code, errorName);
     throw error;
   }
 }
@@ -210,4 +245,100 @@ export function createActivityObservabilityInterceptors(dependencies: Omit<Obser
       })
     }
   });
+}
+
+
+function exportActivitySpanOtlp(
+  dependencies: ObserveActivityDependencies,
+  info: ActivityInfo,
+  args: readonly unknown[],
+  activityType: string,
+  startedAt: number,
+  durationMs: number,
+  queueMs: number | null,
+  outcome: ActivityOutcome,
+  category: FailureCategory | null,
+  reasonCode: string | null,
+  errorName: string | null
+) {
+  const exporter = dependencies.spanExporter;
+  if (!exporter) return;
+  try {
+    const correlation = activityCorrelation(args);
+    const parent = activityTraceparent(args);
+    let traceId: string | null = parent?.traceId ?? null;
+    const temporalRunId = info.workflowExecution?.runId ?? null;
+    let parentSpanId: string | null = temporalRunId ? runIdToSpanId(temporalRunId) : (parent?.parentId ?? null);
+
+    if (!traceId && correlation.traceId && /^[0-9a-f]{32}$/i.test(correlation.traceId)) {
+      traceId = correlation.traceId.toLowerCase();
+      if (temporalRunId && !parentSpanId) {
+        parentSpanId = runIdToSpanId(temporalRunId);
+      }
+    }
+    if (!traceId) return;
+
+    let spanId = randomBytes(8).toString("hex");
+    while (/^0+$/.test(spanId)) spanId = randomBytes(8).toString("hex");
+
+    const rawAttrs: Record<string, unknown> = {
+      "service.name": "space-worker",
+      "temporal.activity_type": activityType,
+      "temporal.activity_id": info.activityId,
+      "temporal.attempt": info.attempt,
+      "temporal.workflow_type": info.workflowType ?? null,
+      "temporal.workflow_id": info.workflowExecution?.workflowId ?? null,
+      "temporal.run_id": temporalRunId,
+      "temporal.status": outcome === "COMPLETED" ? "COMPLETED" : "FAILED",
+      "temporal.outcome": outcome,
+      "temporal.duration_ms": durationMs,
+      "temporal.queue_ms": queueMs,
+      "temporal.reason_code": reasonCode,
+      "temporal.failure_category": category,
+      "temporal.error_name": errorName,
+      "space.room_id": correlation.roomId,
+      "space.pane_id": correlation.paneId,
+      "space.mission_id": correlation.missionId,
+      "space.turn_id": correlation.turnId,
+      "space.action_id": correlation.actionId,
+      "space.agent_run_id": correlation.agentRunId,
+      "space.agent_session_id": correlation.agentSessionId,
+      "space.trace_id": correlation.traceId,
+      "space.parent_trace_id": correlation.parentTraceId,
+      "space.activity_type": activityType,
+      "space.outcome": outcome,
+      "space.attempt": info.attempt
+    };
+    const attributes = allowlistSpanAttributes(rawAttrs);
+
+    const links: OtlpSpanLink[] = [];
+    for (const arg of args) {
+      if (!arg || typeof arg !== "object") continue;
+      const r = arg as Record<string, unknown>;
+      const turn = (r.turn ?? (r.item as Record<string, unknown>)?.turn) as Record<string, unknown> | undefined;
+      const cont = (r.roomAgentContinuation ?? turn?.roomAgentContinuation) as { sourceRunId?: string } | undefined;
+      if (cont?.sourceRunId) {
+        links.push({
+          traceId,
+          spanId: runIdToSpanId(cont.sourceRunId),
+          attributes: { "link.reason": "room_background_continuation" }
+        });
+        break;
+      }
+    }
+
+    const span: OtlpSpan = {
+      traceId,
+      spanId,
+      parentSpanId,
+      name: `activity ${activityType}`,
+      kind: 1,
+      startTimeUnixNano: BigInt(startedAt) * 1_000_000n,
+      endTimeUnixNano: BigInt(startedAt + durationMs) * 1_000_000n,
+      attributes,
+      error: outcome === "FAILED" || outcome === "FAILED_RESULT",
+      links: links.length > 0 ? links : undefined
+    };
+    exporter.record(span);
+  } catch {}
 }

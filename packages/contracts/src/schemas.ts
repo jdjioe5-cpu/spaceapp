@@ -1,20 +1,33 @@
 import { dotIdSchema } from "./dots.js";
+import { dotScheduleRecurrenceSchema, isValidTimeZone, nextDotScheduleRun } from "./dot-schedules.js";
 import { agentRunLedgerSchema, agentRunEvaluationSchema, agentRunMeasuredUsageSchema, agentRunCostSchema } from "./agent-run-ledger.js";
 import { autoRouteShadowSchema } from "./auto-routing.js";
 import { taskAcceptanceSchema } from "./task-acceptance.js";
 import { cliAdapterContractSchema } from "./cli-adapter.js";
 import { controlToolSchemas } from "./space-control.js";
 import { z } from "zod";
+import { planWaitsOnSchema } from "./plan-map.js";
 import { roomMiniRouteSchema } from "./pane-catalog.js";
+import { nousSettingsSchema } from "./nous.js";
+import { brokerScopeSchema } from "./broker-scopes.js";
+import { patchSchema } from "./partial-update.js";
+import { MAX_ROOM_LIMIT, MAX_ROOMS } from "./room-names.js";
 import { taskMetadataSchema } from "./task-metadata.js";
 import { t3CodePaneMetadataSchema } from "./t3code.js";
 import { jobApplyPaneMetadataSchema, jobCopilotAccountProfileIdSchema } from "./job-apply.js";
 import { copilotLaunchSettingsSchema } from "./copilot.js";
 import { mailCopilotPaneMetadataSchema } from "./mail-copilot.js";
 import { marketingCopilotPaneMetadataSchema } from "./marketing-copilot.js";
+import { freelanceCopilotPaneMetadataSchema } from "./freelance-copilot.js";
+import { DESIGN_COLOR_PRESETS_MAX, designColorPresetSchema, designPaneMetadataSchema } from "./design.js";
+import { appStudioPaneMetadataSchema } from "./app-studio.js";
+import { securityCopilotPaneMetadataSchema } from "./security-copilot.js";
+import { monitoringCopilotPaneMetadataSchema } from "./monitoring-copilot.js";
+import { videoPaneMetadataSchema } from "./video.js";
 import { notificationSettingsSchema } from "./notifications.js";
 import { traceparentSchema } from "./observability.js";
 import { demoProjectIdSchema, demoVariantIdSchema } from "./demo-projects.js";
+import { atLeastOneField } from "./update-rules.js";
 
 export const isoDateTimeSchema = z.string().datetime({ offset: true });
 export const idSchema = z.string().min(8).max(128).regex(/^[a-zA-Z0-9._:-]+$/);
@@ -112,7 +125,7 @@ export const paginated = <T extends z.ZodType>(item: T) =>
   });
 
 export const integrationStatusSchema = z.enum(["VERIFIED", "DISABLED", "ERROR"]);
-export const paneModeSchema = z.enum(["CHAT", "CODE", "BROWSER", "REVIEW", "SWARM", "DESIGN", "TERMINAL", "YOUTUBE", "VNC", "HARNESS", "LIVE", "FILES", "DEMOS", "DATABASES", "T3CODE", "JOB_APPLY", "MAIL_COPILOT", "MARKETING_COPILOT"]);
+export const paneModeSchema = z.enum(["CHAT", "CODE", "BROWSER", "REVIEW", "SWARM", "DESIGN", "TERMINAL", "YOUTUBE", "VNC", "HARNESS", "LIVE", "FILES", "DEMOS", "DATABASES", "T3CODE", "JOB_APPLY", "MAIL_COPILOT", "MARKETING_COPILOT", "FREELANCE_COPILOT", "APP_STUDIO", "VIDEO", "SECURITY_COPILOT", "MONITORING_COPILOT"]);
 export const paneStatusSchema = z.enum(["IDLE", "QUEUED", "RUNNING", "BLOCKED", "ERROR", "COMPLETE", "CLOSED"]);
 export const paneTitleSourceSchema = z.enum(["auto", "manual", "ai"]);
 export const paneCategoryColors = ["red", "orange", "yellow", "green", "cyan", "blue", "purple", "pink"] as const;
@@ -137,7 +150,7 @@ export const artifactKindSchema = z.enum([
   "CONSOLE_LOG",
   "NETWORK_LOG",
   "TRACE",
-  "VIDEO",
+  "VIDEO", "AUDIO",
   "PATCH",
   "TRANSCRIPT",
   "EXPORT",
@@ -175,11 +188,20 @@ export const eventTypeSchema = z.enum([
   "JOB_APPLY_UPDATED",
   "MAIL_COPILOT_UPDATED",
   "MARKETING_COPILOT_UPDATED",
+  "FREELANCE_COPILOT_UPDATED",
+  "DESIGN_UPDATED",
+  "APP_STUDIO_UPDATED",
+  "VIDEO_UPDATED",
+  "SECURITY_COPILOT_UPDATED",
+  "MONITORING_COPILOT_UPDATED",
   "NOTIFICATION_CREATED",
-  "NOTIFICATION_UPDATED"
+  "NOTIFICATION_UPDATED",
+  "NOUS_PANE_BOARD_UPDATED"
 ]);
 
 export const roomKindSchema = z.enum(["WORKSPACE", "AGENT_PROOF", "CLI_RECOVERY"]);
+
+export const roomSharePermissionSchema = z.enum(["VIEW", "COLLABORATE"]);
 
 export const roomSchema = z.object({
   id: idSchema,
@@ -195,7 +217,9 @@ export const roomSchema = z.object({
   archivedAt: isoDateTimeSchema.nullable(),
   paneCap: z.number().int().min(1).max(16),
   traceId: requestIdSchema,
-  ownerUserId: idSchema.nullable().optional()
+  ownerUserId: idSchema.nullable().optional(),
+  /** Only on a room shared with the caller (MU-007: the web hides write controls of a VIEW share). */
+  sharePermission: roomSharePermissionSchema.optional()
 });
 
 export const createRoomInputSchema = z.object({
@@ -250,7 +274,18 @@ export const cliChatTurnDefaultRuntimeIds = [
   "cli:opencode"
 ] as const;
 
-export const proofRoomProfileSchema = z.enum(["STANDARD", "ACTIVE_AGENT_STRESS", "CLI_INPUT", "CLI_RENDER", "CLI_RENDER_AI", "WARM_CAPACITY"]);
+// Fixed dev diagnostic fixtures; no caller-controlled pane modes or launch arguments.
+export const warmMixedProofManifests = Object.freeze({
+  WARM_MIXED_C: Object.freeze(["TERMINAL", "TERMINAL", "TERMINAL", "TERMINAL"] as const),
+  WARM_MIXED_B: Object.freeze(["TERMINAL", "TERMINAL", "TERMINAL", "TERMINAL", "BROWSER"] as const),
+  WARM_MIXED_P: Object.freeze(["TERMINAL", "TERMINAL", "TERMINAL", "TERMINAL", "MARKETING_COPILOT"] as const),
+  WARM_MIXED_M: Object.freeze(["TERMINAL", "TERMINAL", "TERMINAL", "TERMINAL", "BROWSER", "MARKETING_COPILOT"] as const)
+});
+export type WarmMixedProofProfile = keyof typeof warmMixedProofManifests;
+export const isWarmMixedProofProfile = (value: unknown): value is WarmMixedProofProfile =>
+  typeof value === "string" && Object.hasOwn(warmMixedProofManifests, value);
+
+export const proofRoomProfileSchema = z.enum(["STANDARD", "ACTIVE_AGENT_STRESS", "CLI_INPUT", "CLI_RENDER", "CLI_RENDER_AI", "WARM_CAPACITY", "WARM_MIXED_C", "WARM_MIXED_B", "WARM_MIXED_P", "WARM_MIXED_M"]);
 export const cliRenderProofRuntimeSchema = z.enum(["CODEX", "GEMINI", "OPENCODE", "ALL"]);
 
 export const createProofRoomInputSchema = z
@@ -263,6 +298,12 @@ export const createProofRoomInputSchema = z
   })
   .strict()
   .superRefine((input, context) => {
+    if (isWarmMixedProofProfile(input.profile)) {
+      if (input.paneCount !== warmMixedProofManifests[input.profile].length || input.runtimeId !== undefined || input.renderRuntime !== undefined || input.roomLabel !== undefined) {
+        context.addIssue({code:"custom",message:"Mixed proof requires the exact fixed manifest without overrides."});
+      }
+      return;
+    }
     if (input.profile === "WARM_CAPACITY") {
       if (input.paneCount !== 16 || input.runtimeId !== undefined || input.renderRuntime !== undefined) {
         context.addIssue({code:"custom",message:"Warm capacity requires exactly sixteen fixed synthetic Codex terminals."});
@@ -435,6 +476,12 @@ export const paneSchema = z.object({
   jobApplyMetadata: jobApplyPaneMetadataSchema.nullable().optional(),
   mailCopilotMetadata: mailCopilotPaneMetadataSchema.nullable().optional(),
   marketingCopilotMetadata: marketingCopilotPaneMetadataSchema.nullable().optional(),
+  freelanceCopilotMetadata: freelanceCopilotPaneMetadataSchema.nullable().optional(),
+  designMetadata: designPaneMetadataSchema.nullable().optional(),
+  appStudioMetadata: appStudioPaneMetadataSchema.nullable().optional(),
+  videoMetadata: videoPaneMetadataSchema.nullable().optional(),
+  securityCopilotMetadata: securityCopilotPaneMetadataSchema.nullable().optional(),
+  monitoringCopilotMetadata: monitoringCopilotPaneMetadataSchema.nullable().optional(),
   paneName: z.string().min(1).max(60).nullable().optional(),
   mode: paneModeSchema,
   status: paneStatusSchema,
@@ -468,6 +515,18 @@ export const proofRoomSchema = z
   .superRefine((value, context) => {
     if (value.room.kind !== "AGENT_PROOF") {
       context.addIssue({ code: "custom", path: ["room", "kind"], message: "Proof rooms must use AGENT_PROOF kind." });
+    }
+    if (isWarmMixedProofProfile(value.profile)) {
+      const modes = warmMixedProofManifests[value.profile];
+      const terminals = modes.filter(mode => mode !== "BROWSER").length;
+      if (value.panes.length !== modes.length || value.sessionIds.length !== terminals || new Set(value.sessionIds).size !== terminals || value.runtimeId !== undefined || value.renderRuntime !== undefined || new Set(value.panes.map(pane => pane.id)).size !== modes.length || value.panes.some((pane,index) =>
+        pane.roomId !== value.room.id || pane.mode !== modes[index] || pane.isClosed || pane.isMinimized ||
+        pane.title !== `Mixed ${value.profile!.slice(-1)} ${index + 1}` ||
+        pane.terminalRuntimeId !== (modes[index] === "BROWSER" ? null : "cli:codex") ||
+        pane.cwd !== (modes[index] === "BROWSER" ? null : "/tmp"))) {
+        context.addIssue({code:"custom",message:"Mixed proof pane/session manifest changed."});
+      }
+      return;
     }
     if (value.profile === "WARM_CAPACITY" && (value.panes.length !== 16 || value.sessionIds.length !== 16)) {
       context.addIssue({code:"custom",message:"Warm capacity requires sixteen owned panes and sessions."});
@@ -525,12 +584,12 @@ export const createPaneInputSchema = z
     split: paneSplitSchema.optional()
   })
   .superRefine((input, context) => {
-    // Copilot panes (Job, Mail, Marketing) run their agent in a CLI session, so they carry a runtime too.
-    if (input.terminalRuntimeId && input.mode !== "TERMINAL" && input.mode !== "JOB_APPLY" && input.mode !== "MAIL_COPILOT" && input.mode !== "MARKETING_COPILOT") {
+    // Copilot panes (Job, Mail, Marketing, Freelance), Design, App Studio and Video panes run their agent in a CLI session, so they carry a runtime too.
+    if (input.terminalRuntimeId && input.mode !== "TERMINAL" && input.mode !== "JOB_APPLY" && input.mode !== "MAIL_COPILOT" && input.mode !== "MARKETING_COPILOT" && input.mode !== "FREELANCE_COPILOT" && input.mode !== "DESIGN" && input.mode !== "APP_STUDIO" && input.mode !== "VIDEO" && input.mode !== "SECURITY_COPILOT" && input.mode !== "MONITORING_COPILOT") {
       context.addIssue({
         code: "custom",
         path: ["terminalRuntimeId"],
-        message: "Terminal runtime selection requires TERMINAL, JOB_APPLY, MAIL_COPILOT or MARKETING_COPILOT mode."
+        message: "Terminal runtime selection requires TERMINAL, JOB_APPLY, MAIL_COPILOT, MARKETING_COPILOT, FREELANCE_COPILOT, DESIGN, APP_STUDIO, VIDEO, SECURITY_COPILOT or MONITORING_COPILOT mode."
       });
     }
     if (input.vncTarget && input.mode !== "VNC") {
@@ -610,6 +669,54 @@ export const roomPaneBatchItemSchema = z.discriminatedUnion("mode", [
       /** The account that runtime's CLI starts on; the pane's CLI session keeps it. */
       accountProfileId: jobCopilotAccountProfileIdSchema.optional()
     })
+    .strict(),
+  z
+    .object({
+      mode: z.literal("FREELANCE_COPILOT"),
+      terminalRuntimeId: z.string().trim().min(1).max(160).optional(),
+      /** The account that runtime's CLI starts on; the pane's CLI session keeps it. */
+      accountProfileId: jobCopilotAccountProfileIdSchema.optional()
+    })
+    .strict(),
+  z
+    .object({
+      mode: z.literal("DESIGN"),
+      terminalRuntimeId: z.string().trim().min(1).max(160).optional(),
+      /** The account that runtime's CLI starts on; the pane's CLI session keeps it. */
+      accountProfileId: jobCopilotAccountProfileIdSchema.optional()
+    })
+    .strict(),
+  z
+    .object({
+      mode: z.literal("APP_STUDIO"),
+      terminalRuntimeId: z.string().trim().min(1).max(160).optional(),
+      /** The account that runtime's CLI starts on; the pane's CLI session keeps it. */
+      accountProfileId: jobCopilotAccountProfileIdSchema.optional()
+    })
+    .strict(),
+  z
+    .object({
+      mode: z.literal("VIDEO"),
+      terminalRuntimeId: z.string().trim().min(1).max(160).optional(),
+      /** The account that runtime's CLI starts on; the pane's CLI session keeps it. */
+      accountProfileId: jobCopilotAccountProfileIdSchema.optional()
+    })
+    .strict(),
+  z
+    .object({
+      mode: z.literal("SECURITY_COPILOT"),
+      terminalRuntimeId: z.string().trim().min(1).max(160).optional(),
+      /** The account that runtime's CLI starts on; the pane's CLI session keeps it. */
+      accountProfileId: jobCopilotAccountProfileIdSchema.optional()
+    })
+    .strict(),
+  z
+    .object({
+      mode: z.literal("MONITORING_COPILOT"),
+      terminalRuntimeId: z.string().trim().min(1).max(160).optional(),
+      /** The account that runtime's CLI starts on; the pane's CLI session keeps it. */
+      accountProfileId: jobCopilotAccountProfileIdSchema.optional()
+    })
     .strict()
 ]);
 
@@ -634,10 +741,15 @@ export const roomPanesResultSchema = z.object({
 const persistedTranscriptTokenPattern = /\bsk-[A-Za-z0-9_-]{8,}\b/g;
 const persistedTranscriptLabeledSecretPattern =
   /\b(api[_-]?key|secret|token|password)\s*[:=]\s*([^\s,;]+)/gi;
+// Space Control tokens (space-control-token.ts) are self-identifying: prefix.payload.sig in base64url. Redact them by
+// shape so they vanish even when a CLI echoes the bare value or the SPACE_CONTROL_TOKEN= name (the _TOKEN= label has no
+// \b before "token", so the labeled pattern above misses it). Codex, Claude Code and Oh My Pi all carry this token.
+const persistedTranscriptControlTokenPattern = /\bspacecontrol\.v\d+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g;
 
 export function redactPersistedTranscriptContent(value: string): string {
   return value
     .replaceAll("\0", "")
+    .replace(persistedTranscriptControlTokenPattern, "[REDACTED]")
     .replace(persistedTranscriptTokenPattern, "[REDACTED]")
     .replace(persistedTranscriptLabeledSecretPattern, (match, label: string, secretValue: string) =>
       secretValue === "[REDACTED]" ? match : `${label}:[REDACTED]`
@@ -836,7 +948,7 @@ export const updateAgentPaneBindingInputSchema = z
     selectedToolIds: z.array(z.string().trim().min(1).max(160)).max(50).nullable().optional(),
     lastSyncedAt: isoDateTimeSchema.nullable().optional()
   })
-  .refine((input) => Object.keys(input).length > 0, "Agent pane binding update must include at least one field.");
+  .refine(...atLeastOneField("Agent pane binding update must include at least one field."));
 
 export const agentPaneMessageSchema = z.object({
   id: z.string().min(1).max(200),
@@ -913,9 +1025,11 @@ export const updateRoomAgentMissionInputSchema = z
     pausedAt: isoDateTimeSchema.nullable().optional(),
     totalPausedMs: z.number().int().min(0).optional(),
     lastProgressAt: isoDateTimeSchema.nullable().optional(),
-    executionState: z.record(z.string(), z.unknown()).optional()
+    executionState: z.record(z.string(), z.unknown()).optional(),
+    // Safe machine code of a failed mission (trace lookup); the first one recorded is kept.
+    errorCode: z.string().trim().min(1).max(96).optional()
   })
-  .refine((input) => Object.keys(input).length > 0, "Room agent mission update must include at least one field.");
+  .refine(...atLeastOneField("Room agent mission update must include at least one field."));
 
 export const roomAgentActionTypeSchema = z.enum([
   "CONTROL",
@@ -962,7 +1076,7 @@ export const updateRoomAgentActionInputSchema = z
     statusReason: z.string().trim().min(1).max(1000).optional(),
     completedAt: isoDateTimeSchema.nullable().optional()
   })
-  .refine((input) => Object.keys(input).length > 0, "Room agent action update must include at least one field.");
+  .refine(...atLeastOneField("Room agent action update must include at least one field."));
 
 export const roomAgentPlanStatusSchema = z.enum(["READY", "PAUSED_BY_ROOM_AGENT", "RUNNING", "COMPLETED"]);
 export const roomAgentRoomPlanSchema = z.object({
@@ -1006,8 +1120,8 @@ export const roomAgentPaneStripItemSchema = z.object({
   isMinimized: z.boolean()
 });
 
-/** What the room monitor saw happen in a pane; the Room Agent's activity feed. */
-export const roomAgentEventKindSchema = z.enum(["FINISHED", "WAITING", "ERROR", "USAGE_LIMIT", "SIGN_IN", "STUCK"]);
+/** What the room monitor saw happen in a pane, or OVERLAP: panes whose work collides; the Room Agent's activity feed. */
+export const roomAgentEventKindSchema = z.enum(["FINISHED", "WAITING", "QUESTION", "ERROR", "USAGE_LIMIT", "SIGN_IN", "STUCK", "OVERLAP"]);
 /** OPEN: new; HANDLED: the Room Agent acted; ESCALATED: needs the operator; RESOLVED: cleared by itself; ACKED: dismissed. */
 export const roomAgentEventStatusSchema = z.enum(["OPEN", "HANDLED", "ESCALATED", "RESOLVED", "ACKED"]);
 export const roomAgentEventSchema = z.object({
@@ -1088,7 +1202,9 @@ export const roomAgentTaskRunRecordSchema = roomAgentTaskResultSchema.extend({
   firstResponseAt: isoDateTimeSchema.nullable(),
   updatedAt: isoDateTimeSchema
 });
-export const upsertRoomAgentTaskRunInputSchema = roomAgentTaskRunRecordSchema.omit({ updatedAt: true });
+export const upsertRoomAgentTaskRunInputSchema = roomAgentTaskRunRecordSchema.omit({ updatedAt: true }).extend({
+  errorCode: z.string().trim().min(1).max(96).nullable().optional()
+});
 
 export const roomAgentMissionSummarySchema = z.object({
   totalTasks: z.number().int().min(0),
@@ -1812,7 +1928,12 @@ export const browserPageSummarySchema = z.object({
   isActive: z.boolean(),
   openerPageId: z.string().min(1).max(200).nullable().default(null),
   canGoBack: z.boolean().default(false),
-  canGoForward: z.boolean().default(false)
+  canGoForward: z.boolean().default(false),
+  /**
+   * The Google account of a tab that is not in its pane's account (null: the pane's account). A Browser Host that
+   * predates per-tab accounts omits the field.
+   */
+  account: z.object({ profileId: z.string().min(1).max(200), label: z.string().max(320).nullable() }).nullable().optional()
 });
 
 export const agentRuntimeSchema = z.object({
@@ -2362,7 +2483,7 @@ export const updatePaneCliSessionInputSchema = z
     cliTaskRevisionId: idSchema.nullable().optional(),
     accountProfileId: cliAccountProfileIdSchema.nullable().optional()
   })
-  .refine((input) => Object.keys(input).length > 0, "CLI session update must include at least one field.");
+  .refine(...atLeastOneField("CLI session update must include at least one field."));
 
 export const paneCliTerminalControlLeaseSchema = z.object({
   leaseId: idSchema,
@@ -3098,7 +3219,7 @@ export const updatePaneBrowserSessionInputSchema = z
     isActive: z.boolean().optional(),
     endedAt: isoDateTimeSchema.nullable().optional()
   })
-  .refine((input) => Object.keys(input).length > 0, "Browser session update must include at least one field.");
+  .refine(...atLeastOneField("Browser session update must include at least one field."));
 
 export const createPaneBrowserSessionRequestSchema = z.object({
   viewport: browserSessionViewportSchema.default("desktop"),
@@ -3114,7 +3235,7 @@ export const updatePaneBrowserSessionRequestSchema = z
     targetUrl: z.string().trim().url().optional(),
     streamMode: browserStreamModeSchema.optional()
   })
-  .refine((input) => Object.keys(input).length > 0, "Browser session update must include at least one field.");
+  .refine(...atLeastOneField("Browser session update must include at least one field."));
 
 export const updateBrowserStreamModeInputSchema = z.object({
   streamMode: browserStreamModeSchema
@@ -3123,7 +3244,13 @@ export const updateBrowserStreamModeInputSchema = z.object({
 export const browserPageListResponseSchema = z.object({
   sessionId: idSchema,
   activePageId: z.string().min(1).max(200).nullable(),
-  pages: z.array(browserPageSummarySchema).max(100)
+  pages: z.array(browserPageSummarySchema).max(100),
+  /**
+   * The CLI pane that last drove this browser and its room, for the frame's corner label; the API adds it, never the Browser Host.
+   * `active` while it drives it (the last 10 minutes or an open CDP connection), else the label says "Last" with `drivenAt`.
+   */
+  agent: z.object({ paneId: idSchema, title: z.string(), paneName: z.string().nullable().optional(), roomId: idSchema, roomName: z.string(),
+    drivenAt: z.string(), active: z.boolean() }).nullable().optional()
 });
 
 export const createBrowserPageInputSchema = z.object({
@@ -3174,7 +3301,7 @@ export const updateBrowserControlLeaseInputSchema = z
     reason: z.string().trim().min(1).max(500).nullable().optional(),
     ttlSeconds: z.number().int().min(5).max(300).optional()
   })
-  .refine((input) => Object.keys(input).length > 0, "Browser control lease update must include at least one field.");
+  .refine(...atLeastOneField("Browser control lease update must include at least one field."));
 
 export const acquireBrowserControlInputSchema = z.object({
   holderType: browserControlHolderTypeSchema,
@@ -3185,11 +3312,15 @@ export const acquireBrowserControlInputSchema = z.object({
 
 export const browserControlLeaseActionInputSchema = z.object({
   leaseId: idSchema,
-  ttlSeconds: z.number().int().min(5).max(300).optional()
+  ttlSeconds: z.number().int().min(5).max(300).optional(),
+  /** Heartbeat: the operator is on the pane (tab shown, pane in view and focused or maximized). The API never passes it to the host. */
+  present: z.boolean().optional()
 });
 
 export const browserControlLeaseResponseSchema = z.object({
-  lease: browserControlLeaseSchema
+  lease: browserControlLeaseSchema,
+  /** The lease serves a sign-in, code or CAPTCHA handoff: while the operator is on the pane it is not idle (operator 2026-10-27). */
+  presenceHold: z.boolean().optional()
 });
 
 export const browserCaptureJobStatusSchema = z.enum(["QUEUED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED"]);
@@ -3257,7 +3388,7 @@ export const updateBrowserCaptureJobInputSchema = z
     startedAt: isoDateTimeSchema.nullable().optional(),
     completedAt: isoDateTimeSchema.nullable().optional()
   })
-  .refine((input) => Object.keys(input).length > 0, "Browser capture job update must include at least one field.");
+  .refine(...atLeastOneField("Browser capture job update must include at least one field."));
 
 export const browserCaptureJobResponseSchema = z.object({ job: browserCaptureJobSchema });
 
@@ -3332,7 +3463,7 @@ export const updateBrowserCaptureSegmentInputSchema = z
     statusReason: z.string().trim().min(1).max(500).nullable().optional(),
     finalizedAt: isoDateTimeSchema.nullable().optional()
   })
-  .refine((input) => Object.keys(input).length > 0, "Browser capture segment update must include at least one field.");
+  .refine(...atLeastOneField("Browser capture segment update must include at least one field."));
 
 export const browserCaptureSegmentListResponseSchema = z.object({
   jobId: idSchema,
@@ -3383,7 +3514,8 @@ export const createBrowserHandoffRequestInputSchema = browserHandoffRequestSchem
   .extend({
     handoffRequestId: idSchema.optional(),
     reason: z.string().trim().min(1).max(500),
-    ttlSeconds: z.number().int().min(30).max(1800).default(300)
+    // Up to 16 hours: a handoff asked during the operator's night waits for their morning (plan clipboard:9XSwTPyxXP1W).
+    ttlSeconds: z.number().int().min(30).max(57_600).default(300)
   });
 
 export const updateBrowserHandoffRequestInputSchema = z
@@ -3413,7 +3545,7 @@ export const updateBrowserHandoffRequestInputSchema = z
   });
 
 export const browserHandoffRequestResponseSchema = z.object({
-  handoff: browserHandoffRequestSchema
+  handoff: browserHandoffRequestSchema.nullable()
 });
 
 export const browserTimelineEventTypeSchema = z.enum([
@@ -3628,6 +3760,16 @@ export const browserToolActionInputSchema = z.discriminatedUnion("type", [
     type: z.literal("set_viewport"),
     viewport: browserSessionViewportSchema
   }),
+  // A key press: submit a form (Enter), move between controls (Tab, Shift+Tab), clear a field (Control+A, Backspace) or pick a
+  // native dropdown option (arrows, Enter: the open list is not in any frame, so clicks cannot reach it); returns no page content.
+  browserActionBaseSchema.extend({
+    type: z.literal("press"),
+    key: z.enum(["Enter", "Tab", "Shift+Tab", "Backspace", "Delete", "Escape", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "Space", "Control+A"])
+  }),
+  // A screenshot with every form field, text area and editable area drawn as dots (the pane that filled a Vault page sees it).
+  browserActionBaseSchema.extend({
+    type: z.literal("masked_screenshot")
+  }),
   browserActionBaseSchema.extend({
     type: z.literal("diagnostics"),
     includeNetwork: z.boolean().default(true),
@@ -3638,8 +3780,26 @@ export const browserToolActionInputSchema = z.discriminatedUnion("type", [
     durationMs: z.number().int().min(250).max(1_800_000).default(3_000),
     intervalMs: z.number().int().min(40).max(4_000).default(500),
     format: z.enum(["frames", "gif", "webm", "both"]).default("both")
+  }),
+  // The operator's live view only (option D, plan clipboard:gHaiX_8yanVA): Chrome draws an open native dropdown in a popup
+  // no frame shows, so the view asks for it (`browserSelectStateSchema` as text) and draws its own list; the pick goes as keys.
+  browserActionBaseSchema.extend({
+    type: z.literal("select_state")
+  }),
+  browserActionBaseSchema.extend({
+    type: z.literal("select_choose"),
+    index: z.number().int().min(0).max(499)
   })
 ]);
+
+/** An open native dropdown: its box in viewport pixels, option labels, disabled indexes, and whether labels were left out. */
+export const browserSelectStateSchema = z.object({
+  selectedIndex: z.number().int().min(-1),
+  box: z.object({ x: z.number(), y: z.number(), width: z.number().min(0), height: z.number().min(0) }),
+  labels: z.array(z.string().max(80)).max(500),
+  disabled: z.array(z.number().int().min(0)).max(500),
+  truncated: z.boolean()
+});
 
 export const browserToolActionTypeSchema = z.enum([
   "navigate",
@@ -3649,8 +3809,12 @@ export const browserToolActionTypeSchema = z.enum([
   "type",
   "scroll",
   "set_viewport",
+  "press",
+  "masked_screenshot",
   "diagnostics",
-  "record"
+  "record",
+  "select_state",
+  "select_choose"
 ]);
 
 export const browserToolActionResultSchema = z.object({
@@ -3667,11 +3831,13 @@ export const spaceBrowserToolIdSchema = z.enum([
   "browser:type",
   "browser:scroll",
   "browser:set_viewport",
+  "browser:press",
+  "browser:masked_screenshot",
   "browser:diagnostics",
   "browser:record"
 ]);
 
-function expectedBrowserToolIdForAction(type: z.infer<typeof browserToolActionTypeSchema>): z.infer<typeof spaceBrowserToolIdSchema> {
+function expectedBrowserToolIdForAction(type: z.infer<typeof browserToolActionTypeSchema>): z.infer<typeof spaceBrowserToolIdSchema> | null {
   switch (type) {
     case "navigate":
       return "browser:navigate";
@@ -3687,10 +3853,18 @@ function expectedBrowserToolIdForAction(type: z.infer<typeof browserToolActionTy
       return "browser:scroll";
     case "set_viewport":
       return "browser:set_viewport";
+    case "press":
+      return "browser:press";
+    case "masked_screenshot":
+      return "browser:masked_screenshot";
     case "diagnostics":
       return "browser:diagnostics";
     case "record":
       return "browser:record";
+    // The live view's own dropdown list: no agent tool.
+    case "select_state":
+    case "select_choose":
+      return null;
   }
 }
 
@@ -3706,7 +3880,9 @@ export const spaceAgentBrowserActionRequestSchema = z
       context.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["toolId"],
-        message: `toolId ${input.toolId} does not match browser action type ${input.action.type}.`
+        message: expected
+          ? `toolId ${input.toolId} does not match browser action type ${input.action.type}.`
+          : `Browser action type ${input.action.type} belongs to the operator's live view.`
       });
     }
   });
@@ -3826,6 +4002,10 @@ export const spaceCliBrowserCommandSchema = z.discriminatedUnion("type", [
     reason: z.string().trim().min(1).max(500)
   }).strict(),
   z.object({ type: z.literal("HANDOFF_STATUS") }).strict(),
+  // Withdraws the agent's own request that no operator has taken yet (a wait that timed out, a wrong page).
+  z.object({ type: z.literal("CANCEL_HANDOFF") }).strict(),
+  // Takes the pane browser back from an operator who has not touched it for BROWSER_CONTROL_AGENT_RECLAIM_IDLE_MS (2 minutes).
+  z.object({ type: z.literal("RECLAIM_CONTROL") }).strict(),
   // The room owner's saved Google sign-ins, as in the Browser pane's account menu.
   z.object({ type: z.literal("LIST_ACCOUNTS") }).strict(),
   z.object({
@@ -3925,7 +4105,7 @@ export const updateSpaceAgentSessionInputSchema = z
     isActive: z.boolean().optional(),
     lastSyncedAt: isoDateTimeSchema.nullable().optional()
   })
-  .refine((input) => Object.keys(input).length > 0, "Space agent session update must include at least one field.");
+  .refine(...atLeastOneField("Space agent session update must include at least one field."));
 
 export const spaceAgentMessageRecordSchema = z.object({
   dotId: dotIdSchema.nullable().optional(),
@@ -3958,7 +4138,7 @@ export const updateSpaceAgentMessageInputSchema = z
     content: z.string().max(50000).optional(),
     status: agentPaneMessageStatusSchema.optional()
   })
-  .refine((input) => Object.keys(input).length > 0, "Space agent message update must include at least one field.");
+  .refine(...atLeastOneField("Space agent message update must include at least one field."));
 
 export const spaceAgentRunRecordSchema = z.object({
   dotId: dotIdSchema.nullable().optional(),
@@ -4026,7 +4206,7 @@ export const updateSpaceAgentRunInputSchema = z
     errorMessage: z.string().min(1).max(1000).nullable().optional(),
     completedAt: isoDateTimeSchema.nullable().optional()
   })
-  .refine((input) => Object.keys(input).length > 0, "Space agent run update must include at least one field.");
+  .refine(...atLeastOneField("Space agent run update must include at least one field."));
 
 export const coderAgentProxyResourceSchema = z.enum([
   "chat",
@@ -4082,7 +4262,7 @@ export const updateProviderSettingsInputSchema = z
     titleGenerationModelId: z.string().trim().min(1).max(160).nullable().optional(),
     titleGenerationReasoningEffort: reasoningEffortSchema.optional()
   })
-  .refine((input) => Object.keys(input).length > 0, "Provider settings update must include at least one field.");
+  .refine(...atLeastOneField("Provider settings update must include at least one field."));
 
 export const voiceTranscriptionMaxBytes = 25 * 1024 * 1024;
 // Legacy ids remain accepted for a short compatibility window so an already-open
@@ -4134,7 +4314,7 @@ export const voiceModelVoiceSchema = z.enum([
 ]);
 export const voiceTranscriptionLanguageSchema = z.enum(["auto", "el", "en"]);
 export const voiceTranscriptionDelaySchema = z.enum(["minimal", "low", "medium", "high", "xhigh"]);
-export const liveAudioProviderIdSchema = z.enum(["openai", "google", "amazon", "local", "vercel"]);
+export const liveAudioProviderIdSchema = z.enum(["openai", "google", "amazon", "local", "vercel", "fish"]);
 
 export const voiceTranscriptionSettingsSchema = z.object({
   enabled: z.boolean(),
@@ -4197,7 +4377,7 @@ export const voiceRealtimeSessionRequestSchema = z.object({
 });
 
 export const voiceRealtimeSessionResponseSchema = z.object({
-  protocol: z.enum(["gpt-live", "openai-realtime", "openai-transcription", "gateway-realtime", "google-live"]).optional(),
+  protocol: z.enum(["gpt-live", "openai-realtime", "openai-transcription", "gateway-realtime", "google-live", "fish-cascade"]).optional(),
   answerSdp: voiceSessionDescriptionSchema.optional(),
   websocketUrl: z.string().optional(),
   sessionId: z.string().optional(),
@@ -4273,7 +4453,7 @@ export const updateProviderInputSchema = z
     backingProviderId: z.string().trim().min(1).max(120).nullable().optional(),
     credentialRef: z.string().trim().max(500).nullable().optional()
   })
-  .refine((input) => Object.keys(input).length > 0, "Provider update must include at least one field.");
+  .refine(...atLeastOneField("Provider update must include at least one field."));
 
 export const modelSchema = z.object({
   id: z.string().min(1).max(160),
@@ -4728,7 +4908,15 @@ export const claudeUsageAccountSchema = z
     apiKeyUsage: z.object({
       requests: z.number().int().min(0),
       costUsd: z.number().min(0),
-      lastUsedAt: isoDateTimeSchema.nullable()
+      lastUsedAt: isoDateTimeSchema.nullable(),
+      // Latest completed gateway request in the last five minutes. Last use alone also includes failed requests.
+      lastRequest: z.object({ at: isoDateTimeSchema, succeeded: z.boolean() }).strict().nullable().optional()
+    }).strict().optional(),
+    // API_KEY only: this UTC month's Anthropic bill (the Admin API key's reports, today's estimate until Anthropic posts it;
+    // null without an admin key) and the monthly budget set in Space Gateway (null: not set).
+    apiKeyMonth: z.object({
+      spentUsd: z.number().min(0).nullable(),
+      budgetUsd: z.number().positive().nullable()
     }).strict().optional()
   })
   .strict();
@@ -4955,7 +5143,11 @@ export const systemAnalyticsModelSchema = z
     avgDurationMs: z.number().min(0).nullable(),
     avgTokPerSec: z.number().min(0).nullable(),
     firstActivityAt: isoDateTimeSchema.nullable(),
-    lastActivityAt: isoDateTimeSchema.nullable()
+    lastActivityAt: isoDateTimeSchema.nullable(),
+    /** What the tokens would cost on the provider's API; null when none of them has a price. */
+    costUsd: z.number().min(0).nullable().optional(),
+    /** Turns with tokens but no known price (left out of costUsd). */
+    unpricedTurns: z.number().int().min(0).optional()
   })
   .strict();
 
@@ -4967,7 +5159,45 @@ export const systemAnalyticsProviderSchema = z
     completedTurns: z.number().int().min(0),
     tokensIn: toolbarByteCountSchema.nullable(),
     tokensOut: toolbarByteCountSchema.nullable(),
-    lastActivityAt: isoDateTimeSchema.nullable()
+    lastActivityAt: isoDateTimeSchema.nullable(),
+    costUsd: z.number().min(0).nullable().optional()
+  })
+  .strict();
+
+/** Token usage page filter: everything, only Space Gateway traffic, or only CLIs talking to their provider directly. */
+export const systemAnalyticsTokenRouteSchema = z.enum(["all", "gateway", "direct"]);
+
+export const systemAnalyticsTokenTotalsSchema = z
+  .object({
+    tokensIn: toolbarByteCountSchema,
+    tokensOut: toolbarByteCountSchema,
+    tokensReasoning: toolbarByteCountSchema,
+    costUsd: z.number().min(0),
+    unpricedTurns: z.number().int().min(0)
+  })
+  .strict();
+
+/** One account's tokens: a Space Gateway account, or a CLI profile on a direct account (`cli:<runtime>/<profile>`). */
+export const systemAnalyticsTokenAccountSchema = systemAnalyticsTokenTotalsSchema
+  .extend({
+    accountKey: z.string().min(1).max(200),
+    label: z.string().min(1).max(200),
+    route: z.enum(["GATEWAY", "DIRECT"]),
+    /** The account's week (Space Gateway subscription accounts): `gatewayWeekPace`, null without a live 7-day window. */
+    weeklyPace: z.object({
+      usedPercent: z.number().min(0).max(100).nullable(),
+      passedPercent: z.number().min(0).max(100),
+      points: z.number().min(-100).max(100).nullable(),
+      resetAt: z.string().min(1).max(40),
+      pace: z.enum(["AHEAD", "ON", "UNDER"]).nullable()
+    }).strict().nullable().optional(),
+    models: z.array(z.object({
+      providerId: z.string().min(1).max(120),
+      modelId: z.string().min(1).max(160),
+      tokensIn: toolbarByteCountSchema,
+      tokensOut: toolbarByteCountSchema,
+      costUsd: z.number().min(0)
+    }).strict()).max(50)
   })
   .strict();
 
@@ -4977,7 +5207,28 @@ export const systemAnalyticsModelsResponseSchema = z
     sampledAt: isoDateTimeSchema,
     providers: z.array(systemAnalyticsProviderSchema).max(100),
     models: z.array(systemAnalyticsModelSchema).max(500),
-    backfill: systemAnalyticsBackfillSchema
+    backfill: systemAnalyticsBackfillSchema,
+    route: systemAnalyticsTokenRouteSchema.optional(),
+    /** Totals through Space Gateway and direct, whatever the filter. */
+    routes: z.object({ gateway: systemAnalyticsTokenTotalsSchema, direct: systemAnalyticsTokenTotalsSchema }).strict().optional(),
+    accounts: z.array(systemAnalyticsTokenAccountSchema).max(200).optional(),
+    /** Tokens per time bucket over the period, through Space Gateway and direct (the route filter applies). */
+    timeline: z.object({
+      bucketSeconds: z.number().int().min(60).max(86_400),
+      points: z.array(z.object({
+        at: isoDateTimeSchema,
+        gatewayTokens: toolbarByteCountSchema,
+        directTokens: toolbarByteCountSchema,
+        costUsd: z.number().min(0)
+      }).strict()).max(60)
+    }).strict().optional(),
+    /** What the period's tokens are: input read from the prompt cache, written to it, fresh input, and output. */
+    composition: z.object({
+      cacheRead: toolbarByteCountSchema,
+      cacheWrite: toolbarByteCountSchema,
+      freshInput: toolbarByteCountSchema,
+      output: toolbarByteCountSchema
+    }).strict().optional()
   })
   .strict();
 
@@ -5632,7 +5883,7 @@ export const updateAdminOperationRunInputSchema = z
     finishedAt: isoDateTimeSchema.nullable().optional()
   })
   .strict()
-  .refine((input) => Object.keys(input).length > 0, "An admin operation update must change at least one field.");
+  .refine(...atLeastOneField("An admin operation update must change at least one field."));
 
 export const cliMaintenanceRequestSchema = z.discriminatedUnion("mode", [
   z.object({ mode: z.literal("CHECK") }).strict(),
@@ -5757,7 +6008,7 @@ export const updateCliMaintenanceAuthHandoffInputSchema = z
     safeErrorCode: z.string().trim().min(1).max(80).regex(/^[A-Z0-9_]+$/).nullable().optional()
   })
   .strict()
-  .refine((input) => Object.keys(input).length > 0, "A CLI auth handoff update must change at least one field.");
+  .refine(...atLeastOneField("A CLI auth handoff update must change at least one field."));
 export const cliMaintenanceAuthHandoffSchema = z
   .object({
     id: idSchema,
@@ -6518,7 +6769,7 @@ export const turnSchema = z.object({
 
 export const turnRuntimeSchema = z.enum(["DUMMY_TEMPORAL", "CODEX_APP_SERVER"]);
 export const imageArtifactMimeTypeSchema = z.enum(["image/png", "image/jpeg", "image/webp"]);
-export const userUploadArtifactSourceSchema = z.enum(["USER_UPLOAD", "CLIPBOARD", "DROP", "SCREEN_CAPTURE"]);
+export const userUploadArtifactSourceSchema = z.enum(["USER_UPLOAD", "CLIPBOARD", "DROP", "SCREEN_CAPTURE", "LIVE_RECORDING"]);
 export const imageArtifactMaxBytes = 10 * 1024 * 1024;
 
 export const artifactSchema = z.object({
@@ -6641,7 +6892,7 @@ export const updateArtifactRetentionInputSchema = z
     pinnedAt: isoDateTimeSchema.nullable().optional(),
     deletedAt: isoDateTimeSchema.nullable().optional()
   })
-  .refine((input) => Object.keys(input).length > 0, "Artifact retention update must include at least one field.");
+  .refine(...atLeastOneField("Artifact retention update must include at least one field."));
 
 export const dummyTurnInputSchema = z.object({
   roomId: idSchema,
@@ -6658,7 +6909,9 @@ export const dummyTurnInputSchema = z.object({
   roomAgentOperatorRequest: z.string().trim().min(1).max(4000).optional(),
   roomAgentContinuation: z.object({
     sourceRunId: idSchema,
-    generation: z.number().int().min(1).max(16)
+    generation: z.number().int().min(1).max(16),
+    sourceTraceId: z.string().optional(),
+    sourceTraceparent: traceparentSchema.optional()
   }).optional(),
   agentUserMessageId: idSchema.optional(),
   agentAssistantMessageId: idSchema.optional(),
@@ -7846,7 +8099,7 @@ export const spaceAgentClipboardSavePlanActionSchema = z.object({
   title: z.string().trim().min(1).max(clipboardPlanTitleMaxCharacters).optional(),
   minimumModel: z.string().trim().min(1).max(clipboardPlanMinimumModelMaxCharacters),
   minimumReasoning: clipboardPlanReasoningSchema.optional(),
-  steps: z.array(z.lazy(() => planStepSchema)).max(100).optional()
+  steps: z.lazy(() => planStepsInputSchema).optional()
 });
 
 export const spaceAgentClipboardActionInputSchema = z.discriminatedUnion("type", [
@@ -8550,7 +8803,9 @@ export const authUserSchema = z.object({
   googleId: z.string().nullable().optional(),
   avatarUrl: z.string().nullable().optional(),
   proofScope: paneCliProofScopeSchema.optional(),
-  automationScope: appDiagnosticsAutomationScopeSchema.optional()
+  automationScope: appDiagnosticsAutomationScopeSchema.optional(),
+  /** Set only by the auth broker on an agent's operator session; the API limits that session to the scope's routes. */
+  brokerScope: brokerScopeSchema.optional()
 }).strict();
 
 export const dateFormatSchema = z.enum([
@@ -8589,6 +8844,9 @@ export const voiceComposerSettingsSchema = z.object({
   terminalShortcutsButton: z.boolean().default(true),
   terminalVariablesButton: z.boolean().default(true),
   terminalPlansButton: z.boolean().default(true),
+  terminalAccountPicker: z.boolean().default(true),
+  terminalLocalDraftButton: z.boolean().default(true),
+  terminalLocalDraft: z.boolean().default(false),
   // Ids of CLI shortcuts hidden from the shortcuts menu; empty shows them all.
   terminalHiddenShortcuts: z.array(z.string().regex(/^[a-z][a-z0-9_]{0,63}$/)).max(64).default([])
 });
@@ -8648,12 +8906,57 @@ export type MailCopilotLaunchSettings = z.infer<typeof mailCopilotLaunchSettings
 /** The same for Marketing Copilot panes (Settings → Marketing Copilot). */
 export const marketingCopilotLaunchSettingsSchema = copilotLaunchSettingsSchema;
 export type MarketingCopilotLaunchSettings = z.infer<typeof marketingCopilotLaunchSettingsSchema>;
+/** The same for Freelance Copilot panes (Settings → Freelance Copilot). */
+export const freelanceCopilotLaunchSettingsSchema = copilotLaunchSettingsSchema;
+export type FreelanceCopilotLaunchSettings = z.infer<typeof freelanceCopilotLaunchSettingsSchema>;
+/** The same for Design panes (Settings → Design); the designer defaults to Claude Code. */
+export const designLaunchSettingsSchema = copilotLaunchSettingsSchema;
+export type DesignLaunchSettings = z.infer<typeof designLaunchSettingsSchema>;
+/** The same for App Studio panes (Settings → App Studio); the agent defaults to Claude Code. */
+export const appStudioLaunchSettingsSchema = copilotLaunchSettingsSchema;
+export type AppStudioLaunchSettings = z.infer<typeof appStudioLaunchSettingsSchema>;
+export const securityCopilotLaunchSettingsSchema = copilotLaunchSettingsSchema;
+export const monitoringCopilotLaunchSettingsSchema = copilotLaunchSettingsSchema;
+/** The same for Video panes (Settings → Video); the agent defaults to Claude Code. */
+export const videoLaunchSettingsSchema = copilotLaunchSettingsSchema;
+export type VideoLaunchSettings = z.infer<typeof videoLaunchSettingsSchema>;
+
+/**
+ * Gemini models on Space Gateway's Antigravity accounts that summarize a YouTube video (YouTube pane); the first is the default. Code
+ * Assist names, not Antigravity's menu names: each watched a YouTube video live on 2026-10-20 (`gemini-3.8-flash-medium`/`-high` and
+ * every 3.1 Pro or 4 Argon name tried answered 404).
+ */
+export const YOUTUBE_SUMMARY_MODELS = [
+  { id: "gemini-3.8-flash-tiered", label: "Gemini 3.8 Flash" },
+  { id: "gemini-3-flash", label: "Gemini 3 Flash" },
+  { id: "gemini-3.5-flash-lite", label: "Gemini 3.5 Flash-Lite, fastest" }
+] as const;
+const youtubeSummaryModelSchema = z.enum(YOUTUBE_SUMMARY_MODELS.map((model) => model.id) as [string, ...string[]]);
+/** The YouTube pane's Download: the tallest video it saves (0: the best YouTube has, the full resolution). */
+export const YOUTUBE_DOWNLOAD_RESOLUTIONS = [
+  { maxHeight: 0, label: "Best available" }, { maxHeight: 2160, label: "4K (2160p)" }, { maxHeight: 1440, label: "1440p" },
+  { maxHeight: 1080, label: "1080p" }, { maxHeight: 720, label: "720p" }, { maxHeight: 480, label: "480p" }
+] as const;
+/** An Agent Files folder path: segments joined by "/", no empty, "." or ".." segment. */
+export const agentFilesFolderSchema = z.string().trim().min(1).max(200).regex(/^[^/\\\u0000-\u001f]+(\/[^/\\\u0000-\u001f]+)*$/)
+  .refine((folder) => folder.split("/").every((segment) => segment.trim() && segment !== "." && segment !== ".."), "Invalid folder.");
+/** "MEDIA/YouTube" as Agent Files names it: "Media / YouTube" (its built-in folders by name). */
+export const agentFilesFolderLabel = (folder: string) => folder.split("/")
+  .map((segment, index) => index === 0 && /^(GRAPHICS|DOCUMENTS|CODE|MEDIA|UPLOADS)$/.test(segment) ? segment[0] + segment.slice(1).toLowerCase() : segment).join(" / ");
+export const youtubeDownloadSettingsSchema = z.object({
+  /** The Agent Files folder downloads are saved in; the Video library lists them too. */
+  folder: agentFilesFolderSchema.default("MEDIA/YouTube"),
+  maxHeight: z.number().int().refine((value) => YOUTUBE_DOWNLOAD_RESOLUTIONS.some((option) => option.maxHeight === value), "Unknown resolution.").default(0)
+}).strict();
+export type YouTubeDownloadSettings = z.infer<typeof youtubeDownloadSettingsSchema>;
 
 export const userSettingsSchema = z.object({
-  uiTheme: z.enum(["modern", "classic", "codex", "motion", "aurora"]).default("modern"),
+  uiTheme: z.enum(["modern", "classic", "codex", "motion", "aurora", "liquid-glass", "jarvis", "aira"]).default("modern"),
   modernAppearance: z.enum(["system", "light", "dark"]).default("system"),
-  modernIconPack: z.enum(["lucide", "material-rounded", "motion", "aurora"]).default("lucide"),
-  uiBackground: z.enum(["spaceapp", "aurora", "none"]).default("spaceapp"),
+  modernIconPack: z.enum(["lucide", "material-rounded", "motion", "aurora", "space"]).default("space"),
+  uiBackground: z.enum(["spaceapp", "aurora", "liquid-glass", "jarvis", "aira", "none"]).default("spaceapp"),
+  // Liquid Glass material, iOS 27 style: 0 is ultra clear, 100 fully tinted.
+  liquidGlassTint: z.number().int().min(0).max(100).default(50),
   roomTheme: z.string().default("graphite"),
   dateTime: dateTimeSettingsSchema.default(defaultDateTimeSettings),
   voice: voiceComposerSettingsSchema.default(defaultVoiceComposerSettings),
@@ -8665,6 +8968,8 @@ export const userSettingsSchema = z.object({
   suppressNotifications: z.boolean().default(false),
   warmRoomEnabled: z.boolean().default(true),
   warmRoomConnectedPaneLimit: z.number().int().min(6).max(96).default(96),
+  /** How many rooms of their own the user may open; test rooms never count (Settings → Workspace → Rooms). */
+  roomLimit: z.number().int().min(1).max(MAX_ROOM_LIMIT).default(MAX_ROOMS),
   cliImagePreviewLimit: z.number().int().min(1).max(24).default(12),
   terminalFontSize: z.number().int().min(8).max(48).default(13),
   showSessionDebugIds: z.boolean().default(false),
@@ -8703,29 +9008,44 @@ export const userSettingsSchema = z.object({
   jobCopilot: jobCopilotLaunchSettingsSchema.nullable().optional(),
   mailCopilot: mailCopilotLaunchSettingsSchema.nullable().optional(),
   marketingCopilot: marketingCopilotLaunchSettingsSchema.nullable().optional(),
+  freelanceCopilot: freelanceCopilotLaunchSettingsSchema.nullable().optional(),
+  design: designLaunchSettingsSchema.nullable().optional(),
+  appStudio: appStudioLaunchSettingsSchema.nullable().optional(),
+  securityCopilot: securityCopilotLaunchSettingsSchema.nullable().optional(),
+  monitoringCopilot: monitoringCopilotLaunchSettingsSchema.nullable().optional(),
+  video: videoLaunchSettingsSchema.nullable().optional(),
+  /** The operator's own colour combinations in the Design Studio (the built-in ones are DESIGN_COLOR_PRESETS). */
+  designColorPresets: z.array(designColorPresetSchema).max(DESIGN_COLOR_PRESETS_MAX).optional(),
   /** Notification channels (in-app, toast, sound, desktop, Telegram) and per-source overrides. */
   notifications: notificationSettingsSchema.nullable().optional(),
+  /** Nous, the mind of SpaceApp: on or off and its hourly turn limit. */
+  nous: nousSettingsSchema.nullable().optional(),
+  /** A model dropped from YOUTUBE_SUMMARY_MODELS reads as the default instead of failing (and resetting) every setting. */
+  youtubeSummaryModel: youtubeSummaryModelSchema.optional().catch(undefined),
+  youtubeDownload: youtubeDownloadSettingsSchema.optional().catch(undefined),
   updatedAt: isoDateTimeSchema.optional()
 });
 
 export const defaultUserSettings = userSettingsSchema.parse({});
 
 export const updateUserSettingsInputSchema = z.object({
-  uiTheme: z.enum(["modern", "classic", "codex", "motion", "aurora"]).optional(),
+  uiTheme: z.enum(["modern", "classic", "codex", "motion", "aurora", "liquid-glass", "jarvis", "aira"]).optional(),
   modernAppearance: z.enum(["system", "light", "dark"]).optional(),
-  modernIconPack: z.enum(["lucide", "material-rounded", "motion", "aurora"]).optional(),
-  uiBackground: z.enum(["spaceapp", "aurora", "none"]).optional(),
+  modernIconPack: z.enum(["lucide", "material-rounded", "motion", "aurora", "space"]).optional(),
+  uiBackground: z.enum(["spaceapp", "aurora", "liquid-glass", "jarvis", "aira", "none"]).optional(),
+  liquidGlassTint: z.number().int().min(0).max(100).optional(),
   roomTheme: z.string().optional(),
-  dateTime: dateTimeSettingsSchema.partial().optional(),
-  voice: voiceComposerSettingsSchema.partial().optional(),
-  keyboardAutocorrect: keyboardAutocorrectSettingsSchema.partial().optional(),
-  livePane: livePaneSettingsSchema.partial().optional(),
+  dateTime: patchSchema(dateTimeSettingsSchema).optional(),
+  voice: patchSchema(voiceComposerSettingsSchema).optional(),
+  keyboardAutocorrect: patchSchema(keyboardAutocorrectSettingsSchema).optional(),
+  livePane: patchSchema(livePaneSettingsSchema).optional(),
   promptVariables: z.array(promptVariableSchema).optional(),
   promptVariablesEnabled: z.boolean().optional(),
   promptVariablesAutoExpandOnSubmit: z.boolean().optional(),
   suppressNotifications: z.boolean().optional(),
   warmRoomEnabled: z.boolean().optional(),
   warmRoomConnectedPaneLimit: z.number().int().min(6).max(96).optional(),
+  roomLimit: z.number().int().min(1).max(MAX_ROOM_LIMIT).optional(),
   cliImagePreviewLimit: z.number().int().min(1).max(24).optional(),
   terminalFontSize: z.number().int().min(8).max(48).optional(),
   showSessionDebugIds: z.boolean().optional(),
@@ -8767,7 +9087,20 @@ export const updateUserSettingsInputSchema = z.object({
   mailCopilot: mailCopilotLaunchSettingsSchema.nullable().optional(),
   /** null forgets the default: the next Marketing Copilot pane asks again. */
   marketingCopilot: marketingCopilotLaunchSettingsSchema.nullable().optional(),
-  notifications: notificationSettingsSchema.nullable().optional()
+  /** null forgets the default: the next Freelance Copilot pane asks again. */
+  freelanceCopilot: freelanceCopilotLaunchSettingsSchema.nullable().optional(),
+  /** null forgets the default: the next Design pane asks again. */
+  design: designLaunchSettingsSchema.nullable().optional(),
+  /** null forgets the default: the next App Studio pane asks again. */
+  appStudio: appStudioLaunchSettingsSchema.nullable().optional(),
+  securityCopilot: securityCopilotLaunchSettingsSchema.nullable().optional(),
+  monitoringCopilot: monitoringCopilotLaunchSettingsSchema.nullable().optional(),
+  video: videoLaunchSettingsSchema.nullable().optional(),
+  designColorPresets: z.array(designColorPresetSchema).max(DESIGN_COLOR_PRESETS_MAX).optional(),
+  notifications: notificationSettingsSchema.nullable().optional(),
+  nous: nousSettingsSchema.nullable().optional(),
+  youtubeSummaryModel: youtubeSummaryModelSchema.optional(),
+  youtubeDownload: youtubeDownloadSettingsSchema.optional()
 }).strict();
 
 export const authMeSchema = z.object({
@@ -8787,12 +9120,65 @@ export const adminUserItemSchema = z.object({
   googleId: z.string().nullable().optional(),
   avatarUrl: z.string().nullable().optional(),
   roomCount: z.number().int().min(0),
+  disabled: z.boolean().optional(),
   createdAt: isoDateTimeSchema,
   updatedAt: isoDateTimeSchema
 }).strict();
 
 export const adminUserListResponseSchema = z.object({
   users: z.array(adminUserItemSchema)
+}).strict();
+
+// Multi-user accounts (plan clipboard:VrMJ14wJPmVs step 2), only with SPACE_MULTI_USER_ENABLED=true: an ADMIN invites an
+// email with a one-time link; the token is shown once and stored as a SHA-256 only.
+export const userInviteRoleSchema = z.enum(["USER", "OPERATOR"]);
+export const userInviteSchema = z.object({
+  id: idSchema,
+  email: z.string().email(),
+  role: userInviteRoleSchema,
+  createdBy: idSchema,
+  createdAt: isoDateTimeSchema,
+  expiresAt: isoDateTimeSchema,
+  acceptedAt: isoDateTimeSchema.nullable(),
+  acceptedUserId: idSchema.nullable(),
+  revokedAt: isoDateTimeSchema.nullable()
+}).strict();
+export const createUserInviteInputSchema = z.object({
+  email: z.string().trim().toLowerCase().email().max(320),
+  role: userInviteRoleSchema.default("USER")
+}).strict();
+export const createUserInviteResponseSchema = z.object({
+  invite: userInviteSchema,
+  token: z.string().min(32).max(200)
+}).strict();
+export const userInviteListResponseSchema = z.object({
+  invites: z.array(userInviteSchema)
+}).strict();
+export const acceptUserInviteInputSchema = z.object({
+  token: z.string().min(32).max(200),
+  password: z.string().min(12).max(500)
+}).strict();
+export const setUserDisabledInputSchema = z.object({
+  disabled: z.boolean()
+}).strict();
+// Room sharing (multi-user step 3, plan clipboard:evAaFYqrgDfd), only with SPACE_MULTI_USER_ENABLED=true: a room's
+// owner shares it with VIEW (read only) or COLLABORATE (own panes in the room); only a pane's owner types into it.
+export const roomShareSchema = z.object({
+  roomId: idSchema,
+  userId: idSchema,
+  permission: roomSharePermissionSchema,
+  createdBy: idSchema,
+  createdAt: isoDateTimeSchema
+}).strict();
+export const setRoomShareInputSchema = z.object({
+  permission: roomSharePermissionSchema
+}).strict();
+export const addRoomShareInputSchema = z.object({
+  email: z.string().trim().toLowerCase().email().max(320),
+  permission: roomSharePermissionSchema
+}).strict();
+export const roomShareListResponseSchema = z.object({
+  shares: z.array(roomShareSchema.extend({ email: z.string().email() }))
 }).strict();
 
 export const updateUserRoleInputSchema = z.object({
@@ -8993,7 +9379,7 @@ export const updateUserLinkRequestSchema = z.object({
   openMode: userLinkOpenModeSchema.optional(),
   category: userLinkCategorySchema.optional(),
   isQuick: z.boolean().optional()
-}).strict().refine((input) => Object.keys(input).length > 0, "Link update must include at least one field.");
+}).strict().refine(...atLeastOneField("Link update must include at least one field."));
 
 export const listUserLinksQuerySchema = z.object({
   q: z.string().trim().min(1).max(500).optional(),
@@ -9080,6 +9466,21 @@ export const planStepSchema = z.preprocess(
 );
 export type PlanStep = z.infer<typeof planStepSchema>;
 
+/**
+ * Steps given without an order all arrive as order 1 (the preprocess default; 2026-10-24: a six-step plan showed six "Stage 1"s and no
+ * step update ever matched). A list whose orders repeat is numbered by position, and an id the preprocess derived from the old order
+ * follows it; an explicit id stays.
+ */
+export function renumberPlanSteps<T extends { id: string; order: number }>(steps: T[]): T[] {
+  if (new Set(steps.map((step) => step.order)).size === steps.length) return steps;
+  return steps.map((step, index) => ({ ...step, id: step.id === `step-${step.order}` ? `step-${index + 1}` : step.id, order: index + 1 }));
+}
+const planStepsInputSchema = z.array(planStepSchema).max(100).transform(renumberPlanSteps);
+
+// Plan map (operator request 2026-10-25): the wait and dependency schemas live in plan-map.ts, a leaf module nous.ts can import too.
+const planDependsOnSchema = z.array(idSchema).max(30);
+
+
 export const clipboardItemSchema = z
   .object({
     id: idSchema,
@@ -9097,6 +9498,9 @@ export const clipboardItemSchema = z
     roomId: idSchema.nullable().default(null),
     paneId: idSchema.nullable().default(null),
     paneTitle: z.string().min(1).max(160).nullable().default(null),
+    dependsOn: planDependsOnSchema.default([]),
+    dueAt: isoDateTimeSchema.nullable().default(null),
+    waitsOn: planWaitsOnSchema.nullable().default(null),
     occurrenceCount: z.number().int().min(1),
     characterCount: z.number().int().min(1).max(clipboardTextMaxCharacters),
     createdAt: isoDateTimeSchema,
@@ -9111,10 +9515,12 @@ export const createClipboardItemRequestSchema = z
     title: z.string().trim().min(1).max(clipboardPlanTitleMaxCharacters).optional(),
     minimumModel: z.string().trim().min(1).max(clipboardPlanMinimumModelMaxCharacters).optional(),
     minimumReasoning: clipboardPlanReasoningSchema.optional(),
-    steps: z.array(planStepSchema).max(100).optional(),
+    steps: planStepsInputSchema.optional(),
     roomId: idSchema.nullable().optional(),
     paneId: idSchema.nullable().optional(),
-    paneTitle: z.string().min(1).max(160).nullable().optional()
+    paneTitle: z.string().min(1).max(160).nullable().optional(),
+    dependsOn: planDependsOnSchema.optional(),
+    dueAt: isoDateTimeSchema.nullable().optional()
   })
   .strict()
   .superRefine((input, context) => {
@@ -9124,6 +9530,9 @@ export const createClipboardItemRequestSchema = z
         path: ["title"],
         message: "Clipboard item titles are allowed only for PLAN items."
       });
+    }
+    if (input.source !== "PLAN" && (input.dependsOn != null || input.dueAt != null)) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: [input.dependsOn != null ? "dependsOn" : "dueAt"], message: "Dependencies and due dates are allowed only for PLAN items." });
     }
     if (input.source === "PLAN" && (!input.minimumModel || input.minimumModel.trim().length === 0)) {
       context.addIssue({
@@ -9159,10 +9568,12 @@ export const saveAgentClipboardPlanInputSchema = z
     title: z.string().trim().min(1).max(clipboardPlanTitleMaxCharacters).optional(),
     minimumModel: z.string().trim().min(1).max(clipboardPlanMinimumModelMaxCharacters),
     minimumReasoning: clipboardPlanReasoningSchema.optional(),
-    steps: z.array(planStepSchema).max(100).optional(),
+    steps: planStepsInputSchema.optional(),
     roomId: idSchema.nullable().optional(),
     paneId: idSchema.nullable().optional(),
-    paneTitle: z.string().min(1).max(160).nullable().optional()
+    paneTitle: z.string().min(1).max(160).nullable().optional(),
+    dependsOn: planDependsOnSchema.optional(),
+    dueAt: isoDateTimeSchema.nullable().optional()
   })
   .strict();
 
@@ -9174,10 +9585,12 @@ export const upsertClipboardItemInputSchema = z
     title: z.string().trim().min(1).max(clipboardPlanTitleMaxCharacters).nullable().optional(),
     minimumModel: z.string().trim().min(1).max(clipboardPlanMinimumModelMaxCharacters).nullable().optional(),
     minimumReasoning: clipboardPlanReasoningSchema.nullable().optional(),
-    steps: z.array(planStepSchema).max(100).optional(),
+    steps: planStepsInputSchema.optional(),
     roomId: idSchema.nullable().optional(),
     paneId: idSchema.nullable().optional(),
-    paneTitle: z.string().min(1).max(160).nullable().optional()
+    paneTitle: z.string().min(1).max(160).nullable().optional(),
+    dependsOn: planDependsOnSchema.optional(),
+    dueAt: isoDateTimeSchema.nullable().optional()
   })
   .strict()
   .superRefine((input, context) => {
@@ -9236,6 +9649,9 @@ export const setClipboardItemCompletedRequestSchema = z
   })
   .strict();
 
+/** A note's new text, edited in place: the note keeps its id, source, room, pane and created time. */
+export const updateClipboardNoteTextRequestSchema = z.object({ text: nonBlankExactText(clipboardTextMaxCharacters) }).strict();
+
 export const updatePlanProgressRequestSchema = z
   .object({
     executionStatus: planExecutionStatusSchema.optional(),
@@ -9251,10 +9667,17 @@ export const updatePlanProgressRequestSchema = z
         proof: z.string().max(1000).optional()
       })
       .optional(),
-    steps: z.array(planStepSchema).optional(),
+    steps: z.array(planStepSchema).transform(renumberPlanSteps).optional(),
     paneId: z.string().trim().nullable().optional(),
     roomId: z.string().trim().nullable().optional(),
-    paneTitle: z.string().trim().nullable().optional()
+    paneTitle: z.string().trim().nullable().optional(),
+    /** The plan map: `dependsOn` replaces the list ([] clears), `dueAt` and `waitsOn` null clear. */
+    dependsOn: planDependsOnSchema.optional(),
+    dueAt: isoDateTimeSchema.nullable().optional(),
+    waitsOn: planWaitsOnSchema.nullable().optional(),
+    /** The plan's own title and text, edited in place (Nous daily upgrade 2026-10-27): the record keeps its id. */
+    title: z.string().trim().min(1).max(clipboardPlanTitleMaxCharacters).optional(),
+    text: nonBlankExactText(clipboardTextMaxCharacters).optional()
   })
   .strict();
 
@@ -9269,8 +9692,34 @@ export type SaveAgentClipboardPlanInput = z.infer<typeof saveAgentClipboardPlanI
 export type UpsertClipboardItemInput = z.infer<typeof upsertClipboardItemInputSchema>;
 export type ListClipboardItemsQuery = z.infer<typeof listClipboardItemsQuerySchema>;
 export type SetClipboardItemCompletedRequest = z.infer<typeof setClipboardItemCompletedRequestSchema>;
+export type UpdateClipboardNoteTextRequest = z.infer<typeof updateClipboardNoteTextRequestSchema>;
 export type UpdatePlanProgressRequest = z.infer<typeof updatePlanProgressRequestSchema>;
 export type ClipboardItemListResponse = z.infer<typeof clipboardItemListResponseSchema>;
+
+const taskTimeZoneSchema = z.string().trim().min(1).max(80).refine(isValidTimeZone, "Use an IANA time zone such as Asia/Bangkok.");
+/** When a task runs: Space types its objective into its CLI pane at each occurrence (a task without a pane is a reminder). */
+export const storedTaskScheduleSchema = z.object({ recurrence: dotScheduleRecurrenceSchema, timeZone: taskTimeZoneSchema }).strict();
+/** A schedule as given: without timeZone it runs in its owner's working time zone (resolved by the store). */
+export const taskScheduleInputSchema = storedTaskScheduleSchema.extend({ timeZone: taskTimeZoneSchema.optional() }).strict();
+/**
+ * The owner's working time zone: Settings → Date & time (operator request 2026-10-17, plan clipboard:ubQLgcTtQWA_).
+ * "system" means the browser's own clock, which the server cannot know, so it falls back to UTC like an invalid zone.
+ */
+export function ownerWorkingTimeZone(settings: { dateTime?: { timeZone?: string } } | null | undefined): string {
+  const zone = settings?.dateTime?.timeZone;
+  return zone && zone !== "system" && isValidTimeZone(zone) ? zone : "UTC";
+}
+/** The schedule with its zone: a schedule given without one takes the owner's working time zone; null and undefined pass. */
+export function resolveTaskScheduleZone(schedule: TaskScheduleInput | null | undefined, ownerZone: string): StoredTaskSchedule | null | undefined {
+  return schedule ? { recurrence: schedule.recurrence, timeZone: schedule.timeZone ?? ownerZone } : schedule;
+}
+export const taskScheduleSchema = storedTaskScheduleSchema
+  .extend({
+    nextRunAt: isoDateTimeSchema.nullable(),
+    lastRunAt: isoDateTimeSchema.nullable(),
+    lastOutcome: z.string().max(500).nullable()
+  })
+  .strict();
 
 export const taskItemSchema = z
   .object({
@@ -9285,7 +9734,8 @@ export const taskItemSchema = z
     occurrenceCount: z.number().int().min(1),
     characterCount: z.number().int().min(1).max(taskObjectiveMaxCharacters),
     createdAt: isoDateTimeSchema,
-    lastUsedAt: isoDateTimeSchema
+    lastUsedAt: isoDateTimeSchema,
+    schedule: taskScheduleSchema.nullable().default(null)
   })
   .strict();
 
@@ -9296,7 +9746,8 @@ export const createTaskItemRequestSchema = z
     status: taskStatusSchema.optional(),
     roomId: idSchema.nullable().optional(),
     paneId: idSchema.nullable().optional(),
-    paneTitle: z.string().min(1).max(160).nullable().optional()
+    paneTitle: z.string().min(1).max(160).nullable().optional(),
+    schedule: taskScheduleInputSchema.nullable().optional()
   })
   .strict();
 
@@ -9319,7 +9770,9 @@ export const upsertTaskItemInputSchema = z
     source: taskSourceSchema,
     roomId: idSchema.nullable().optional(),
     paneId: idSchema.nullable().optional(),
-    paneTitle: z.string().min(1).max(160).nullable().optional()
+    paneTitle: z.string().min(1).max(160).nullable().optional(),
+    /** Omitted keeps the stored schedule; null removes it. */
+    schedule: taskScheduleInputSchema.nullable().optional()
   })
   .strict();
 
@@ -9327,18 +9780,20 @@ export const updateTaskItemInputSchema = z
   .object({
     title: z.string().trim().min(1).max(taskTitleMaxCharacters).optional(),
     objective: nonBlankExactText(taskObjectiveMaxCharacters).optional(),
-    status: taskStatusSchema.optional()
+    status: taskStatusSchema.optional(),
+    schedule: taskScheduleInputSchema.nullable().optional()
   })
   .strict()
   .refine(
-    (input) => input.title !== undefined || input.objective !== undefined || input.status !== undefined,
-    { message: "Task update must include title, objective, or status." }
+    (input) => input.title !== undefined || input.objective !== undefined || input.status !== undefined || input.schedule !== undefined,
+    { message: "Task update must include title, objective, status, or schedule." }
   );
 
 export const listTaskItemsQuerySchema = z
   .object({
     q: z.string().trim().min(1).max(500).optional(),
     status: taskStatusSchema.optional(),
+    source: taskSourceSchema.optional(),
     page: z.coerce.number().int().min(1).default(1),
     pageSize: z.coerce.number().int().min(1).max(100).default(25)
   })
@@ -9346,7 +9801,27 @@ export const listTaskItemsQuerySchema = z
 
 export const taskItemListResponseSchema = paginated(taskItemSchema);
 
+/**
+ * The next run of a task's schedule: none for an unscheduled, done or archived task. An unchanged schedule keeps
+ * its pending run, so saving a task again does not shift an interval.
+ */
+export function taskScheduleNextRunAt(
+  schedule: StoredTaskSchedule | null,
+  status: TaskStatus,
+  nowMs: number,
+  stored: TaskSchedule | null = null
+): string | null {
+  if (!schedule || status === "DONE" || status === "ARCHIVED") return null;
+  const unchanged = stored && stored.timeZone === schedule.timeZone && JSON.stringify(stored.recurrence) === JSON.stringify(schedule.recurrence);
+  if (unchanged && stored?.nextRunAt) return stored.nextRunAt;
+  const next = nextDotScheduleRun(schedule.recurrence, schedule.timeZone, nowMs);
+  return next === null ? null : new Date(next).toISOString();
+}
+
 export type TaskStatus = z.infer<typeof taskStatusSchema>;
+export type TaskScheduleInput = z.infer<typeof taskScheduleInputSchema>;
+export type StoredTaskSchedule = z.infer<typeof storedTaskScheduleSchema>;
+export type TaskSchedule = z.infer<typeof taskScheduleSchema>;
 export type TaskSource = z.infer<typeof taskSourceSchema>;
 export type TaskItem = z.infer<typeof taskItemSchema>;
 export type CreateTaskItemRequest = z.infer<typeof createTaskItemRequestSchema>;
@@ -9710,6 +10185,7 @@ export type BrowserSetViewportInput = z.infer<typeof browserSetViewportInputSche
 export type BrowserToolActionType = z.infer<typeof browserToolActionTypeSchema>;
 export type BrowserToolActionInput = z.infer<typeof browserToolActionInputSchema>;
 export type BrowserToolActionResult = z.infer<typeof browserToolActionResultSchema>;
+export type BrowserSelectState = z.infer<typeof browserSelectStateSchema>;
 export type SpaceBrowserToolId = z.infer<typeof spaceBrowserToolIdSchema>;
 export type SpaceAgentBrowserActionRequest = z.infer<typeof spaceAgentBrowserActionRequestSchema>;
 export type SpaceAgentBrowserActionEnvelope = z.infer<typeof spaceAgentBrowserActionEnvelopeSchema>;
@@ -9803,6 +10279,9 @@ export type SystemAnalyticsBackfill = z.infer<typeof systemAnalyticsBackfillSche
 export type SystemAnalyticsModel = z.infer<typeof systemAnalyticsModelSchema>;
 export type SystemAnalyticsProvider = z.infer<typeof systemAnalyticsProviderSchema>;
 export type SystemAnalyticsModelsResponse = z.infer<typeof systemAnalyticsModelsResponseSchema>;
+export type SystemAnalyticsTokenRoute = z.infer<typeof systemAnalyticsTokenRouteSchema>;
+export type SystemAnalyticsTokenTotals = z.infer<typeof systemAnalyticsTokenTotalsSchema>;
+export type SystemAnalyticsTokenAccount = z.infer<typeof systemAnalyticsTokenAccountSchema>;
 export type SystemAnalyticsSeriesPoint = z.infer<typeof systemAnalyticsSeriesPointSchema>;
 export type SystemAnalyticsSeries = z.infer<typeof systemAnalyticsSeriesSchema>;
 export type SystemAnalyticsResourceEntity = z.infer<typeof systemAnalyticsResourceEntitySchema>;
@@ -10055,6 +10534,11 @@ export type ListSharedTasksQuery = z.infer<typeof listSharedTasksQuerySchema>;
 export type UpdateCodexGoalTaskInput = z.infer<typeof updateCodexGoalTaskInputSchema>;
 export type AuthUser = z.infer<typeof authUserSchema>;
 export type AdminUserItem = z.infer<typeof adminUserItemSchema>;
+export type UserInvite = z.infer<typeof userInviteSchema>;
+export type UserInviteRole = z.infer<typeof userInviteRoleSchema>;
+export type RoomShare = z.infer<typeof roomShareSchema>;
+export type RoomSharePermission = z.infer<typeof roomSharePermissionSchema>;
+export type RoomShareListResponse = z.infer<typeof roomShareListResponseSchema>;
 export type AdminUserListResponse = z.infer<typeof adminUserListResponseSchema>;
 export type UpdateUserRoleInput = z.infer<typeof updateUserRoleInputSchema>;
 export type AuthMe = z.infer<typeof authMeSchema>;
