@@ -14,9 +14,6 @@ const mebibyte = 1024 * 1024;
 // 1090.6 MiB with python3 (rc3 without Python: 1057.9 MiB); the trimmed python3-minimal + libpython3-stdlib variant
 // measured 1078.6 MiB, 21.4 MiB under the old 1100 MiB, and arm64 ran about 22 MiB above amd64 in 1.1.5.
 export const containerImageSizeBudgets = Object.freeze({
-  core: 1150 * mebibyte,
-  browser: 1750 * mebibyte,
-  cli: 2800 * mebibyte,
   // Per-service container budgets (Issue #64):
   core: 850 * mebibyte,
   browser: 1350 * mebibyte,
